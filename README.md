@@ -12,6 +12,7 @@ they already have.
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
 - `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
+- `Agent`, `SendMessage`, `TaskOutput`, `TaskStop`, and `ListAgents` MCP tools that drive Codex jobs with the same verbs as the native subagent tools
 
 ## Requirements
 
@@ -137,7 +138,7 @@ Use it when you want Codex to:
 > [!NOTE]
 > Depending on the task and the model you choose these tasks might take a long time and it's generally recommended to force the task to be in the background or move the agent to the background.
 
-It supports `--background`, `--wait`, `--resume`, and `--fresh`. If you omit `--resume` and `--fresh`, the plugin can offer to continue the latest rescue thread for this repo.
+It supports `--background`, `--wait`, `--resume`, `--fresh`, and `--job <id>`. If you omit `--resume` and `--fresh`, the plugin can offer to continue the latest rescue thread for this repo.
 
 Examples:
 
@@ -145,6 +146,7 @@ Examples:
 /codex:rescue investigate why the tests started failing
 /codex:rescue fix the failing test with the smallest safe patch
 /codex:rescue --resume apply the top fix from the last run
+/codex:rescue --job task-abc123 apply the top fix
 /codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
 /codex:rescue --model spark fix the issue quickly
 /codex:rescue --background investigate the regression
@@ -161,6 +163,27 @@ Ask Codex to redesign the database connection to be more resilient.
 - if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
 - if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
 - follow-up rescue requests can continue the latest Codex task in the repo
+- rescue runs add `--write` by default unless you ask for read-only work, and `--write` gives Codex full access with no sandbox
+
+### Codex as a subagent: the `agents` MCP tools
+
+The plugin registers an MCP server named `agents`, so Claude Code sees `mcp__plugin_codex_agents__Agent`, `mcp__plugin_codex_agents__SendMessage`, `mcp__plugin_codex_agents__TaskOutput`, `mcp__plugin_codex_agents__TaskStop`, and `mcp__plugin_codex_agents__ListAgents`: the same verbs as the native subagent tools, one namespace over. Each one is a job id away from the slash commands above.
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `Agent` | `prompt`, `run_in_background`, `write`, `model`, `effort`, `resume` | Runs a Codex task. With `run_in_background` it returns a job id instead of the result; `resume` takes a job id whose Codex thread the task continues |
+| `SendMessage` | `to`, `message`, `summary` | Delivers a message to the job named by `to` |
+| `TaskOutput` | `task_id`, `block`, `timeout` | Reads a job's output |
+| `TaskStop` | `task_id` | Cancels a running job |
+| `ListAgents` | none | Lists this session's jobs with status, phase, elapsed time, and whether each accepts input |
+
+`SendMessage` branches on the job. On a running job it steers the current turn mid-flight: the text joins the turn already in progress, and Codex sees it at its next step. On a finished job it resumes the same Codex thread as a new job, linked to the old one by `parentJobId`, and returns the new job id so the thread's context carries over.
+
+`TaskOutput` with `block` waits for the job to finish or for `timeout` to elapse; otherwise it returns the job's current state, a tail of its log, and the live thread status.
+
+Jobs are scoped to the Claude session, so `ListAgents` and the job ids you get back cover the work this session started.
+
+An MCP tool cannot push into the session, so a background job finishing is not announced on its own. To be notified, run the blocking `TaskOutput`, or the equivalent `output <job-id> --wait <ms>` command, under a background `Bash` call.
 
 ### `/codex:transfer`
 
@@ -193,6 +216,18 @@ Use it to:
 - check progress on background work
 - see the latest completed job
 - confirm whether a task is still running
+
+### Steering a running job
+
+Two `codex-companion` subcommands address a job by the id `/codex:status` shows:
+
+```bash
+steer <job-id> <text>
+output <job-id> --wait <ms>
+```
+
+`steer` adds the text to the job's running turn, which Codex picks up at its next step.
+`output --wait` blocks until the job finishes or the timeout elapses, then prints its state, log tail, and final output.
 
 ### `/codex:result`
 
