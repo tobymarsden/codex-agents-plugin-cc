@@ -276,6 +276,70 @@ function structuredReviewPayload(prompt) {
   });
 }
 
+// Longer than the 96 characters the human log shortens a command to, so a test can show the
+// trace keeping it whole where the log does not.
+const TRACE_COMMAND = "npm run lint -- --max-warnings 0 && npm test -- --runInBand --reporters=default && echo 'trace fixture command finished'";
+
+function traceItems(turnId, cwd, payload) {
+  const command = {
+    type: "commandExecution",
+    id: "cmd_" + turnId,
+    command: TRACE_COMMAND,
+    cwd,
+    source: "agent",
+    status: "inProgress",
+    commandActions: [],
+    aggregatedOutput: null,
+    exitCode: null,
+    durationMs: null
+  };
+  return [
+    {
+      completed: { type: "reasoning", id: "reasoning_empty_" + turnId, summary: [], content: [] }
+    },
+    {
+      completed: { type: "agentMessage", id: "msg_plan_" + turnId, text: "Planning the change.\\nFirst lint, then edit.", phase: "analysis" }
+    },
+    {
+      started: command,
+      completed: {
+        ...command,
+        status: "completed",
+        aggregatedOutput: "lint: 0 warnings\\ntest: 12 passed\\ntrace fixture command finished",
+        exitCode: 0,
+        durationMs: 1234
+      }
+    },
+    {
+      completed: {
+        type: "fileChange",
+        id: "chg_" + turnId,
+        status: "completed",
+        changes: [
+          { path: cwd + "/src/retry.js", kind: { type: "update", move_path: null }, diff: "@@ -1,2 +1,2 @@\\n-const attempts = 1;\\n+const attempts = 3;" },
+          { path: cwd + "/src/retry.test.js", kind: { type: "add" }, diff: "@@ -0,0 +1,1 @@\\n+test('retries three times', () => {});" }
+        ]
+      }
+    },
+    {
+      completed: {
+        type: "mcpToolCall",
+        id: "mcp_" + turnId,
+        server: "docs",
+        tool: "search",
+        status: "completed",
+        arguments: { query: "retry policy", limit: 3 },
+        result: { hits: ["docs/retry.md"] },
+        error: null,
+        durationMs: 0
+      }
+    },
+    {
+      completed: { type: "agentMessage", id: "msg_" + turnId, text: payload, phase: "final_answer" }
+    }
+  ];
+}
+
 function taskPayload(prompt, resume) {
   if (prompt.includes("<task>") && prompt.includes("Only review the work from the previous Claude turn.")) {
     if (BEHAVIOR === "adversarial-clean") {
@@ -617,7 +681,7 @@ rl.on("line", (line) => {
           break;
         }
 
-        const items = [
+        const items = BEHAVIOR === "with-trace" ? traceItems(turnId, thread.cwd, payload) : [
           ...(BEHAVIOR === "with-reasoning"
             ? [
                 {

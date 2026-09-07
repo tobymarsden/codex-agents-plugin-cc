@@ -187,7 +187,7 @@ const TOOLS = [
   {
     name: "TaskOutput",
     description:
-      "Read a Codex job's output: its status, model and tokens, live thread state, and final result. block waits until it finishes or timeout. tail includes that many lines of the job's log on request; the log's path is reported either way. For a completion notification instead of polling, run the output --wait command that Agent printed under a background Bash call.",
+      "Read a Codex job at one of three levels: the final result and metadata by default, a numbered trace of every action with trace, or the whole record behind one numbered line with step. block waits until it finishes or timeout. tail includes that many lines of the job's log on request; the log's path is reported either way. For a completion notification instead of polling, run the output --wait command that Agent printed under a background Bash call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -198,6 +198,8 @@ const TOOLS = [
           type: "number",
           description: "Log lines of Codex's reasoning and commands to include; omit for the result only."
         },
+        trace: { type: "boolean", description: "Return a numbered trace of what Codex did, one line per action." },
+        step: { type: "number", description: "Return the full record for one numbered line of the trace." },
         cwd: CWD_SCHEMA
       },
       required: ["task_id"]
@@ -211,7 +213,9 @@ const TOOLS = [
         taskId,
         ...workspace,
         ...(cursor === undefined ? [] : ["--since", String(cursor)]),
-        ...(args.tail == null ? [] : ["--tail", String(args.tail)])
+        ...(args.tail == null ? [] : ["--tail", String(args.tail)]),
+        ...(args.trace ? ["--trace"] : []),
+        ...(args.step == null ? [] : ["--step", String(args.step)])
       ];
       if (args.block !== false) {
         command.push("--wait", String(args.timeout ?? DEFAULT_OUTPUT_TIMEOUT_MS));

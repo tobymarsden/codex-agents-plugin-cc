@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { getSessionRuntimeStatus, readAppServerThread } from "./codex.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
-import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
+import { readJobEvents, SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
@@ -321,6 +321,17 @@ function readJobResultText(storedJob) {
   return storedJob?.errorMessage ?? null;
 }
 
+function selectTraceStep(job, records, step) {
+  const record = records.find((entry) => entry.n === step);
+  if (record) {
+    return record;
+  }
+  const range = records.length === 0 ? "none were recorded" : `valid steps are 1-${records.length}`;
+  throw Object.assign(new Error(`Step ${step} is out of range for job ${job.id}; ${range}.`), {
+    code: "CODEX_TRACE_STEP_RANGE"
+  });
+}
+
 export async function buildOutputSnapshot(cwd, reference, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
@@ -340,12 +351,17 @@ export async function buildOutputSnapshot(cwd, reference, options = {}) {
   // A reader cursor belongs to the log it was measured against, so it does not carry
   // across a resume: the descendant's log is a different, shorter file.
   // The trail is opt-in: without `--tail` the reader gets the result and the log's path.
-  const log = readJobLogTail(job.logFile, options.tail ?? 0, continuedFrom ? 0 : (options.since ?? 0));
+  // A trace or a step is read instead of the log, not alongside it.
+  const wantsTrace = Boolean(options.trace) || options.step != null;
+  const log = readJobLogTail(job.logFile, wantsTrace ? 0 : (options.tail ?? 0), continuedFrom ? 0 : (options.since ?? 0));
+  const records = wantsTrace ? readJobEvents(job.eventsFile) : [];
 
   return {
     workspaceRoot,
     job,
     ...(continuedFrom ? { continuedFrom } : {}),
+    trace: options.trace ? records : null,
+    step: options.step == null ? null : selectTraceStep(job, records, options.step),
     log: log.lines,
     logStart: log.logStart,
     logTotal: log.logTotal,

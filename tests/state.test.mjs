@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { makeTempDir } from "./helpers.mjs";
 import { listJobs, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
+import { resolveJobEventsFile } from "../plugins/codex/scripts/lib/tracked-jobs.mjs";
 
 const STATE_MODULE_URL = pathToFileURL(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "../plugins/codex/scripts/lib/state.mjs")
@@ -56,13 +57,16 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
     const jobId = `job-${index}`;
     const updatedAt = new Date(Date.UTC(2026, 0, 1, 0, index, 0)).toISOString();
     const logFile = resolveJobLogFile(workspace, jobId);
+    const eventsFile = resolveJobEventsFile(workspace, jobId);
     const jobFile = resolveJobFile(workspace, jobId);
     fs.writeFileSync(logFile, `log ${jobId}\n`, "utf8");
+    fs.writeFileSync(eventsFile, `{"n":1,"type":"message","text":"${jobId}"}\n`, "utf8");
     fs.writeFileSync(jobFile, JSON.stringify({ id: jobId, status: "completed" }, null, 2), "utf8");
     return {
       id: jobId,
       status: "completed",
       logFile,
+      eventsFile,
       updatedAt,
       createdAt: updatedAt
     };
@@ -90,12 +94,17 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
 
   const prunedJobFile = resolveJobFile(workspace, "job-0");
   const prunedLogFile = resolveJobLogFile(workspace, "job-0");
+  const prunedEventsFile = resolveJobEventsFile(workspace, "job-0");
   const retainedJobFile = resolveJobFile(workspace, "job-50");
   const retainedLogFile = resolveJobLogFile(workspace, "job-50");
+  const retainedEventsFile = resolveJobEventsFile(workspace, "job-50");
   const jobsDir = path.dirname(prunedJobFile);
 
   assert.equal(fs.existsSync(retainedJobFile), true);
   assert.equal(fs.existsSync(retainedLogFile), true);
+  assert.equal(fs.existsSync(retainedEventsFile), true);
+  assert.equal(fs.existsSync(prunedLogFile), false);
+  assert.equal(fs.existsSync(prunedEventsFile), false);
 
   const savedState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
   assert.equal(savedState.jobs.length, 50);
@@ -106,7 +115,7 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
   assert.deepEqual(
     fs.readdirSync(jobsDir).sort(),
     Array.from({ length: 50 }, (_, index) => `job-${index + 1}`)
-      .flatMap((jobId) => [`${jobId}.json`, `${jobId}.log`])
+      .flatMap((jobId) => [`${jobId}.json`, `${jobId}.log`, `${jobId}.events.jsonl`])
       .sort()
   );
 });

@@ -139,6 +139,7 @@ export function saveState(cwd, state) {
     }
     removeJobFile(resolveJobFile(cwd, job.id));
     removeFileIfExists(job.logFile);
+    removeFileIfExists(job.eventsFile);
   }
 
   const stateFile = resolveStateFile(cwd);

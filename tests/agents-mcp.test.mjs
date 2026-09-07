@@ -317,6 +317,48 @@ test("TaskOutput includes the log only when tail is given, and reads it forward 
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
+test("TaskOutput returns the numbered trace and one full step on request", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "with-trace");
+  commitFixtureRepo(repo);
+
+  const server = startServer(repo, binDir);
+  try {
+    await server.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+
+    const launched = await callTool(server, "Agent", {
+      prompt: "make the retry policy explicit",
+      run_in_background: true
+    });
+    const taskId = launched.text.match(/Started Codex job (task-[a-z0-9-]+)/)[1];
+    await waitFor(() => readJobs(repo).find((job) => job.id === taskId && job.status === "completed"));
+
+    const traced = await callTool(server, "TaskOutput", { task_id: taskId, block: false, trace: true });
+    assert.equal(traced.isError, false, traced.text);
+    assert.match(traced.text, /^1\. message /m);
+    assert.match(traced.text, /^2\. command {5}npm run lint .+ \(exit 0, 1\.2s\)$/m);
+    assert.match(traced.text, /^3\. fileChange {2}src\/retry\.js, src\/retry\.test\.js$/m);
+    assert.match(traced.text, /^4\. tool {8}docs\/search \(completed\)$/m);
+    assert.doesNotMatch(traced.text, /lint: 0 warnings/);
+
+    const stepped = await callTool(server, "TaskOutput", { task_id: taskId, block: false, step: 2 });
+    assert.equal(stepped.isError, false, stepped.text);
+    assert.match(stepped.text, /^Step 2: command at /m);
+    assert.match(stepped.text, /^Status: completed, exit 0, 1\.2s$/m);
+    assert.match(stepped.text, /^lint: 0 warnings$/m);
+
+    const outOfRange = await callTool(server, "TaskOutput", { task_id: taskId, block: false, step: 99 });
+    assert.equal(outOfRange.isError, true, outOfRange.text);
+    assert.match(outOfRange.text, /valid steps are 1-5/);
+  } finally {
+    await server.close();
+  }
+
+  const cleanup = endSession(repo, binDir);
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
 test("agents MCP tools report refusals and unknown jobs as tool errors", async () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

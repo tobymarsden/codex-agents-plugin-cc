@@ -6,7 +6,7 @@
  * @typedef {import("./app-server-protocol").ThreadStartParams} ThreadStartParams
  * @typedef {import("./app-server-protocol").Turn} Turn
  * @typedef {import("./app-server-protocol").UserInput} UserInput
- * @typedef {((update: string | { message: string, phase: string | null, threadId?: string | null, turnId?: string | null, stderrMessage?: string | null, logTitle?: string | null, logBody?: string | null }) => void)} ProgressReporter
+ * @typedef {((update: string | { message: string, phase: string | null, threadId?: string | null, turnId?: string | null, stderrMessage?: string | null, logTitle?: string | null, logBody?: string | null, record?: Record<string, unknown> | null }) => void)} ProgressReporter
  * @typedef {{
  *   threadId: string,
  *   rootThreadId: string,
@@ -301,6 +301,98 @@ function describeCompletedItem(state, item) {
   }
 }
 
+const EVENT_STRING_LIMIT = 100000;
+const EVENT_TRUNCATION_MARKER = "\n[truncated]";
+
+/** Caps every string in the record, however deeply nested, so one runaway diff cannot bloat the store. */
+function capEventStrings(value, cap) {
+  if (typeof value === "string") {
+    if (value.length <= EVENT_STRING_LIMIT) {
+      return value;
+    }
+    cap.truncated = true;
+    return `${value.slice(0, EVENT_STRING_LIMIT)}${EVENT_TRUNCATION_MARKER}`;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => capEventStrings(entry, cap));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, capEventStrings(entry, cap)]));
+  }
+  return value;
+}
+
+/** The structured twin of the human log line: the whole item, unshortened, for the trace. */
+function describeItemRecord(item) {
+  switch (item.type) {
+    case "commandExecution":
+      return {
+        type: "command",
+        command: item.command,
+        cwd: item.cwd ?? null,
+        status: item.status ?? null,
+        exitCode: item.exitCode ?? null,
+        durationMs: item.durationMs ?? null,
+        output: item.aggregatedOutput ?? null
+      };
+    case "fileChange":
+      return {
+        type: "fileChange",
+        status: item.status ?? null,
+        paths: (item.changes ?? []).map((change) => change.path),
+        changes: item.changes ?? []
+      };
+    case "agentMessage":
+      return { type: "message", text: item.text ?? "", phase: item.phase ?? null };
+    case "reasoning": {
+      // An empty summary is not a step worth numbering.
+      const sections = extractReasoningSections(item.summary);
+      return sections.length > 0 ? { type: "reasoning", sections } : null;
+    }
+    case "mcpToolCall":
+      return {
+        type: "tool",
+        server: item.server ?? null,
+        tool: item.tool,
+        status: item.status ?? null,
+        durationMs: item.durationMs ?? null,
+        arguments: item.arguments ?? null,
+        result: item.result ?? null
+      };
+    case "dynamicToolCall":
+      return {
+        type: "tool",
+        server: null,
+        tool: item.tool,
+        status: item.status ?? null,
+        durationMs: item.durationMs ?? null,
+        arguments: item.arguments ?? null,
+        result: item.contentItems ?? null
+      };
+    case "webSearch":
+      return { type: "search", query: item.query ?? null };
+    case "collabAgentToolCall":
+      return {
+        type: "subagent",
+        tool: item.tool,
+        status: item.status ?? null,
+        threads: item.receiverThreadIds ?? []
+      };
+    default:
+      return null;
+  }
+}
+
+function buildItemRecord(item) {
+  const record = describeItemRecord(item);
+  if (!record) {
+    return null;
+  }
+  const cap = { truncated: false };
+  const capped = capEventStrings(record, cap);
+  return cap.truncated ? { ...capped, truncated: true } : capped;
+}
+
 /** @returns {TurnCaptureState} */
 function createTurnCaptureState(threadId, options = {}) {
   let resolveCompletion;
@@ -587,7 +679,12 @@ function applyTurnNotification(state, message) {
       recordItem(state, message.params.item, "completed", message.params.threadId ?? null);
       {
         const update = describeCompletedItem(state, message.params.item);
-        emitProgress(state.onProgress, update?.message, update?.phase ?? null);
+        // The store takes the item whole; the log keeps its shortened line. An item with
+        // no log line of its own (a message, a reasoning summary) still earns a record.
+        const record = buildItemRecord(message.params.item);
+        if (state.onProgress && (update?.message || record)) {
+          state.onProgress({ message: update?.message ?? "", phase: update?.phase ?? null, record });
+        }
       }
       break;
     case "thread/tokenUsage/updated":

@@ -55,6 +55,7 @@ import {
   createJobRecord,
   createProgressReporter,
   nowIso,
+  resolveJobEventsFile,
   runTrackedJob,
   SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
@@ -93,8 +94,9 @@ function printUsage() {
       "    --write gives Codex full access with no sandbox.",
       "  node scripts/codex-companion.mjs steer <job-id> [--prompt-file <path>] [--json] [text]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
-      "  node scripts/codex-companion.mjs output <job-id> [--wait <ms>] [--tail <n>] [--since <n>] [--json]",
+      "  node scripts/codex-companion.mjs output <job-id> [--wait <ms>] [--tail <n>] [--since <n>] [--trace|--step <n>] [--json]",
       "    --tail includes that many log lines; without it the log stays on disk and only its path is reported.",
+      "    --trace prints one numbered line per action Codex took; --step <n> prints the full record behind line n.",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -643,11 +645,14 @@ function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summ
 
 function createTrackedProgress(job, options = {}) {
   const logFile = options.logFile ?? createJobLogFile(job.workspaceRoot, job.id, job.title);
+  const eventsFile = resolveJobEventsFile(job.workspaceRoot, job.id);
   return {
     logFile,
+    eventsFile,
     progress: createProgressReporter({
       stderr: Boolean(options.stderr),
       logFile,
+      eventsFile,
       onEvent: createJobProgressUpdater(job.workspaceRoot, job.id)
     })
   };
@@ -722,11 +727,11 @@ function requireTaskRequest(prompt, resumeLast) {
 }
 
 async function runForegroundCommand(job, runner, options = {}) {
-  const { logFile, progress } = createTrackedProgress(job, {
+  const { logFile, eventsFile, progress } = createTrackedProgress(job, {
     logFile: options.logFile,
     stderr: !options.json
   });
-  const execution = await runTrackedJob(job, () => runner(progress), { logFile });
+  const execution = await runTrackedJob(job, () => runner(progress), { logFile, eventsFile });
   outputResult(options.json ? execution.payload : execution.rendered, options.json);
   if (execution.exitStatus !== 0) {
     process.exitCode = execution.exitStatus;
@@ -748,7 +753,7 @@ function spawnDetachedTaskWorker(cwd, jobId) {
 }
 
 function enqueueBackgroundTask(cwd, job, request) {
-  const { logFile } = createTrackedProgress(job);
+  const { logFile, eventsFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
   const child = spawnDetachedTaskWorker(cwd, job.id);
@@ -758,6 +763,7 @@ function enqueueBackgroundTask(cwd, job, request) {
     phase: "queued",
     pid: child.pid ?? null,
     logFile,
+    eventsFile,
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
@@ -988,7 +994,7 @@ async function handleTaskWorker(argv) {
     throw new Error(`Stored job ${options["job-id"]} is missing its task request payload.`);
   }
 
-  const { logFile, progress } = createTrackedProgress(
+  const { logFile, eventsFile, progress } = createTrackedProgress(
     {
       ...storedJob,
       workspaceRoot
@@ -1001,14 +1007,15 @@ async function handleTaskWorker(argv) {
     {
       ...storedJob,
       workspaceRoot,
-      logFile
+      logFile,
+      eventsFile
     },
     () =>
       executeTaskRun({
         ...request,
         onProgress: progress
       }),
-    { logFile }
+    { logFile, eventsFile }
   );
 }
 
@@ -1050,10 +1057,21 @@ function parseNumericOption(value, flag) {
   return parsed;
 }
 
+function parseStepOption(value) {
+  if (value === undefined) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error("--step requires a positive whole number.");
+  }
+  return parsed;
+}
+
 async function handleOutput(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "wait", "tail", "since"],
-    booleanOptions: ["json"]
+    valueOptions: ["cwd", "wait", "tail", "since", "step"],
+    booleanOptions: ["json", "trace"]
   });
 
   const cwd = resolveCommandCwd(options);
@@ -1065,6 +1083,11 @@ async function handleOutput(argv) {
   const tail = parseNumericOption(options.tail, "--tail");
   const since = parseNumericOption(options.since, "--since");
   const waitTimeoutMs = parseNumericOption(options.wait, "--wait");
+  const trace = Boolean(options.trace);
+  const step = parseStepOption(options.step);
+  if (trace && step !== null) {
+    throw new Error("Use either --trace or --step <n>, not both.");
+  }
 
   if (waitTimeoutMs !== null) {
     // Wait on the job `output` will report: the newest job in the reference's resume chain.
@@ -1073,7 +1096,7 @@ async function handleOutput(argv) {
     await waitForJobCompletion(cwd, latest.id, waitTimeoutMs);
   }
 
-  const snapshot = await buildOutputSnapshot(cwd, reference, { tail, since });
+  const snapshot = await buildOutputSnapshot(cwd, reference, { tail, since, trace, step });
   const payload =
     waitTimeoutMs === null
       ? snapshot

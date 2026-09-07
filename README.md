@@ -175,13 +175,15 @@ The plugin registers an MCP server named `agents`, so Claude Code sees `mcp__plu
 |---|---|---|
 | `Agent` | `prompt`, `run_in_background`, `write`, `model`, `effort`, `resume`, `cwd` | Runs a Codex task. With `run_in_background` it returns a job id instead of the result; `resume` takes a job id whose Codex thread the task continues |
 | `SendMessage` | `to`, `message`, `summary`, `cwd` | Delivers a message to the job named by `to` |
-| `TaskOutput` | `task_id`, `block`, `timeout`, `tail`, `cwd` | Reads a job's status, model, tokens and result; `tail` adds log lines |
+| `TaskOutput` | `task_id`, `block`, `timeout`, `trace`, `step`, `tail`, `cwd` | Reads a job's status, model, tokens and result; `trace` lists what Codex did, `step` opens one of those lines |
 | `TaskStop` | `task_id`, `cwd` | Cancels a running job |
 | `ListAgents` | `cwd` | Lists this session's jobs with status, phase, elapsed time, and whether each accepts input |
 
 `SendMessage` branches on the job. On a running job it steers the current turn mid-flight: the text joins the turn already in progress, and Codex sees it at its next step. On a finished job it resumes the same Codex thread as a new job, linked to the old one by `parentJobId`, and returns the new job id so the thread's context carries over. The job id you were given first stays valid: `SendMessage` and `TaskOutput` follow the resume chain to the newest turn, so one handle addresses the whole conversation and `TaskOutput` says `continued as` when it has moved.
 
 `TaskOutput` returns what a native subagent returns: the job's status, its model and token usage, the live thread state, and the final result. Codex's reasoning and commands stay in the job's log on disk, and the read reports that log's path rather than loading it into the session. Pass `tail` to include that many lines of it. With `block` the call waits for the job to finish or for `timeout` to elapse, defaulting to thirty minutes, so a long job usually needs one call rather than a poll loop. Repeat tailed reads are incremental: each call within a session picks up where the last one stopped, and the `[log lines a-b of N]` trailer says how far it got.
+
+Reading a job has three levels. By default you get the final message and its metadata. Pass `trace` for a numbered line per action Codex took: the full shell command, the paths a file edit touched, its own messages in full, and any other tool it called. Pass `step` with one of those numbers for the whole record behind it: a command's output, an edit's diffs, a tool call's arguments and result. The trace is mechanical, never model-summarised, so it says what happened rather than what something thought of it.
 
 Every finished job includes `Model: <model> (<effort>)  Tokens: <total> total, <in> in (<cached> cached), <out> out (<reasoning> reasoning)` in `TaskOutput`; the token figure covers that job's turn, not the whole thread. `ListAgents` appends the model and `<n>tok`.
 

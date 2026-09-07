@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 
-import { readJobFile, resolveJobFile, resolveJobLogFile, upsertJob, writeJobFile } from "./state.mjs";
+import { readJobFile, resolveJobFile, resolveJobLogFile, resolveJobsDir, upsertJob, writeJobFile } from "./state.mjs";
 
 export const SESSION_ID_ENV = "CODEX_COMPANION_SESSION_ID";
 
@@ -20,7 +21,8 @@ function normalizeProgressEvent(value) {
       effort: typeof value.effort === "string" && value.effort.trim() ? value.effort.trim() : null,
       stderrMessage: value.stderrMessage == null ? null : String(value.stderrMessage).trim(),
       logTitle: typeof value.logTitle === "string" && value.logTitle.trim() ? value.logTitle.trim() : null,
-      logBody: value.logBody == null ? null : String(value.logBody).trimEnd()
+      logBody: value.logBody == null ? null : String(value.logBody).trimEnd(),
+      record: value.record && typeof value.record === "object" ? value.record : null
     };
   }
 
@@ -33,7 +35,8 @@ function normalizeProgressEvent(value) {
     effort: null,
     stderrMessage: String(value ?? "").trim(),
     logTitle: null,
-    logBody: null
+    logBody: null,
+    record: null
   };
 }
 
@@ -59,6 +62,29 @@ export function createJobLogFile(workspaceRoot, jobId, title) {
     appendLogLine(logFile, `Starting ${title}.`);
   }
   return logFile;
+}
+
+/**
+ * The structured stream beside the human log: one JSON object per completed item, which is
+ * what `output --trace` and `output --step` read. Written lazily, so a job that did nothing
+ * leaves no store behind.
+ */
+export function resolveJobEventsFile(workspaceRoot, jobId) {
+  return path.join(resolveJobsDir(workspaceRoot), `${jobId}.events.jsonl`);
+}
+
+export function readJobEvents(eventsFile) {
+  if (!eventsFile || !fs.existsSync(eventsFile)) {
+    return [];
+  }
+  // A record is complete only once its newline lands, so a torn trailing write from a job
+  // still running is not yet a record.
+  const text = fs.readFileSync(eventsFile, "utf8");
+  return text
+    .slice(0, text.lastIndexOf("\n") + 1)
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 export function createJobRecord(base, options = {}) {
@@ -109,10 +135,13 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
   };
 }
 
-export function createProgressReporter({ stderr = false, logFile = null, onEvent = null } = {}) {
-  if (!stderr && !logFile && !onEvent) {
+export function createProgressReporter({ stderr = false, logFile = null, eventsFile = null, onEvent = null } = {}) {
+  if (!stderr && !logFile && !eventsFile && !onEvent) {
     return null;
   }
+
+  // A resumed turn appends to the store its job already has, so `n` stays monotonic per job.
+  let nextEventNumber = readJobEvents(eventsFile).length + 1;
 
   return (eventOrMessage) => {
     const event = normalizeProgressEvent(eventOrMessage);
@@ -122,6 +151,11 @@ export function createProgressReporter({ stderr = false, logFile = null, onEvent
     }
     appendLogLine(logFile, event.message);
     appendLogBlock(logFile, event.logTitle, event.logBody);
+    if (eventsFile && event.record) {
+      const line = JSON.stringify({ n: nextEventNumber, at: nowIso(), ...event.record });
+      nextEventNumber += 1;
+      fs.appendFileSync(eventsFile, `${line}\n`, "utf8");
+    }
     onEvent?.(event);
   };
 }
@@ -141,7 +175,8 @@ export async function runTrackedJob(job, runner, options = {}) {
     startedAt: nowIso(),
     phase: "starting",
     pid: process.pid,
-    logFile: options.logFile ?? job.logFile ?? null
+    logFile: options.logFile ?? job.logFile ?? null,
+    eventsFile: options.eventsFile ?? job.eventsFile ?? null
   };
   writeJobFile(job.workspaceRoot, job.id, runningRecord);
   upsertJob(job.workspaceRoot, runningRecord);
@@ -189,7 +224,8 @@ export async function runTrackedJob(job, runner, options = {}) {
       errorMessage,
       pid: null,
       completedAt,
-      logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null
+      logFile: options.logFile ?? job.logFile ?? existing.logFile ?? null,
+      eventsFile: options.eventsFile ?? job.eventsFile ?? existing.eventsFile ?? null
     });
     upsertJob(job.workspaceRoot, {
       id: job.id,

@@ -409,6 +409,151 @@ export function renderJobMetaLine(job) {
   return parts.length > 0 ? parts.join("  ") : null;
 }
 
+const REASONING_GLIMPSE_LIMIT = 96;
+
+function shortenReasoning(text) {
+  const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
+  return normalized.length <= REASONING_GLIMPSE_LIMIT
+    ? normalized
+    : `${normalized.slice(0, REASONING_GLIMPSE_LIMIT - 3)}...`;
+}
+
+function formatDurationMs(durationMs) {
+  return durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;
+}
+
+function formatRecordValue(value) {
+  if (value == null) {
+    return "(none)";
+  }
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+/** The salient content of one trace line: what the agent did, never why, never its output. */
+function formatChangeKind(kind) {
+  if (!kind || typeof kind === "string") {
+    return kind || "change";
+  }
+  return kind.move_path ? `${kind.type}, moved from ${kind.move_path}` : String(kind.type ?? "change");
+}
+
+/** Paths come back absolute; the trace is easier to read relative to the workspace. */
+function relativeToWorkspace(filePath, workspaceRoot) {
+  if (!workspaceRoot || !filePath || !filePath.startsWith(`${workspaceRoot}/`)) {
+    return filePath;
+  }
+  return filePath.slice(workspaceRoot.length + 1);
+}
+
+function traceLineBody(record, workspaceRoot) {
+  switch (record.type) {
+    case "command": {
+      const detail = [
+        record.exitCode == null ? null : `exit ${record.exitCode}`,
+        record.durationMs ? formatDurationMs(record.durationMs) : null
+      ].filter(Boolean);
+      return detail.length > 0 ? `${record.command} (${detail.join(", ")})` : String(record.command ?? "");
+    }
+    case "fileChange":
+      return (record.paths ?? []).map((filePath) => relativeToWorkspace(filePath, workspaceRoot)).join(", ");
+    case "message":
+      return String(record.text ?? "").trimEnd();
+    case "tool": {
+      const name = record.server ? `${record.server}/${record.tool}` : record.tool;
+      return record.status ? `${name} (${record.status})` : String(name ?? "");
+    }
+    case "search":
+      return String(record.query ?? "");
+    case "reasoning":
+      // Reasoning is not an action, so the trace carries only a glimpse of it.
+      return shortenReasoning(record.sections?.[0] ?? "");
+    case "subagent": {
+      const threads = record.threads ?? [];
+      const status = record.status ? ` (${record.status})` : "";
+      return `${record.tool}${status}${threads.length > 0 ? ` ${threads.join(", ")}` : ""}`;
+    }
+    default:
+      return "";
+  }
+}
+
+function renderJobTrace(records, workspaceRoot) {
+  if (records.length === 0) {
+    return ["No trace recorded for this job."];
+  }
+
+  const numberWidth = Math.max(...records.map((record) => String(record.n).length));
+  const typeWidth = Math.max(...records.map((record) => record.type.length));
+  const lines = [];
+  for (const record of records) {
+    const head = `${String(record.n).padStart(numberWidth)}. ${record.type.padEnd(typeWidth)}  `;
+    const [first, ...rest] = traceLineBody(record, workspaceRoot).split("\n");
+    lines.push(`${head}${first}`);
+    for (const continuation of rest) {
+      lines.push(`${" ".repeat(head.length)}${continuation}`);
+    }
+  }
+  return lines;
+}
+
+function renderTraceStep(record) {
+  const lines = [`Step ${record.n}: ${record.type} at ${record.at}`];
+
+  switch (record.type) {
+    case "command":
+      lines.push(`Command: ${record.command}`);
+      if (record.cwd) {
+        lines.push(`Cwd: ${record.cwd}`);
+      }
+      lines.push(
+        `Status: ${record.status ?? "unknown"}` +
+          `${record.exitCode == null ? "" : `, exit ${record.exitCode}`}` +
+          `${record.durationMs ? `, ${formatDurationMs(record.durationMs)}` : ""}`
+      );
+      lines.push("", "Output:", record.output ? String(record.output).trimEnd() : "(none)");
+      break;
+    case "fileChange":
+      lines.push(`Status: ${record.status ?? "unknown"}`);
+      for (const change of record.changes ?? []) {
+        lines.push("", `${change.path} (${formatChangeKind(change.kind)})`);
+        if (change.diff) {
+          lines.push(String(change.diff).trimEnd());
+        }
+      }
+      break;
+    case "message":
+      if (record.phase) {
+        lines.push(`Phase: ${record.phase}`);
+      }
+      lines.push("", String(record.text ?? "").trimEnd());
+      break;
+    case "reasoning":
+      for (const section of record.sections ?? []) {
+        lines.push("", section);
+      }
+      break;
+    case "tool":
+      lines.push(`Tool: ${record.server ? `${record.server}/${record.tool}` : record.tool}`);
+      lines.push(`Status: ${record.status ?? "unknown"}${record.durationMs ? `, ${formatDurationMs(record.durationMs)}` : ""}`);
+      lines.push("", "Arguments:", formatRecordValue(record.arguments));
+      lines.push("", "Result:", formatRecordValue(record.result));
+      break;
+    case "search":
+      lines.push(`Query: ${record.query ?? ""}`);
+      break;
+    case "subagent":
+      lines.push(`Tool: ${record.tool}`, `Status: ${record.status ?? "unknown"}`, `Threads: ${(record.threads ?? []).join(", ")}`);
+      break;
+    default:
+      break;
+  }
+
+  if (record.truncated) {
+    lines.push("", "[recorded fields longer than 100000 characters were truncated]");
+  }
+  return lines;
+}
+
 export function renderJobOutput(snapshot, waitTimeoutMs = null) {
   const job = snapshot.job;
   const timing = job.status === "queued" || job.status === "running" ? job.elapsed : job.duration;
@@ -428,7 +573,12 @@ export function renderJobOutput(snapshot, waitTimeoutMs = null) {
     lines.push(`Thread: ${snapshot.thread.status?.type ?? "unknown"}${acceptsInput}`);
   }
 
-  if (snapshot.log.length > 0) {
+  // A trace or a step answers a different question than the log, so it replaces that section.
+  if (snapshot.step) {
+    lines.push(...renderTraceStep(snapshot.step));
+  } else if (snapshot.trace) {
+    lines.push(...renderJobTrace(snapshot.trace, snapshot.workspaceRoot));
+  } else if (snapshot.log.length > 0) {
     lines.push(...snapshot.log);
     // Report the totals whenever lines are shown: this is how a repeat reader learns where to resume.
     lines.push(`[log lines ${snapshot.logStart}-${snapshot.logTotal} of ${snapshot.logTotal}]`);
@@ -439,7 +589,9 @@ export function renderJobOutput(snapshot, waitTimeoutMs = null) {
     lines.push(`Log: ${snapshot.logTotal} lines at ${snapshot.logFile} (use tail to include them)`);
   }
 
-  if (snapshot.result != null) {
+  // A trace already ends with the final message, and a step was asked for on its own, so
+  // neither repeats the result block.
+  if (snapshot.result != null && !snapshot.trace && !snapshot.step) {
     lines.push("", String(snapshot.result).trimEnd());
   }
 

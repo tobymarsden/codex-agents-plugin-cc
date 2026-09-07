@@ -2200,6 +2200,170 @@ test("output renders a finished job as text", () => {
   assert.doesNotMatch(tailed.stdout, /use tail to include them/);
 });
 
+// The fixture's command is longer than the 96 characters the human log shortens to.
+const TRACE_FIXTURE_COMMAND =
+  "npm run lint -- --max-warnings 0 && npm test -- --runInBand --reporters=default && echo 'trace fixture command finished'";
+
+function runTraceFixtureTask(repo) {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "with-trace");
+  commitFixtureRepo(repo);
+  const env = buildEnv(binDir);
+
+  const finished = run("node", [SCRIPT, "task", "make the retry policy explicit"], { cwd: repo, env });
+  assert.equal(finished.status, 0, finished.stderr);
+  endFixtureSession(repo, env);
+
+  const statePath = path.join(resolveStateDir(repo), "state.json");
+  const job = JSON.parse(fs.readFileSync(statePath, "utf8")).jobs.find((candidate) => candidate.jobClass === "task");
+  return { job, env };
+}
+
+test("a job writes a structured event store beside its log", () => {
+  const repo = makeTempDir();
+  const { job } = runTraceFixtureTask(repo);
+
+  assert.equal(job.eventsFile, path.join(path.dirname(job.logFile), `${job.id}.events.jsonl`));
+  const records = fs
+    .readFileSync(job.eventsFile, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+
+  assert.deepEqual(
+    records.map((record) => record.n),
+    [1, 2, 3, 4, 5]
+  );
+  assert.deepEqual(
+    records.map((record) => record.type),
+    ["message", "command", "fileChange", "tool", "message"]
+  );
+  assert.ok(records.every((record) => !Number.isNaN(Date.parse(record.at))), job.eventsFile);
+  assert.equal(records[1].command, TRACE_FIXTURE_COMMAND);
+  assert.equal(records[1].exitCode, 0);
+  assert.equal(records[1].durationMs, 1234);
+  assert.match(records[1].output, /lint: 0 warnings\ntest: 12 passed/);
+  assert.deepEqual(
+    records[2].paths.map((filePath) => filePath.replace(/^.*\//, "")),
+    ["retry.js", "retry.test.js"]
+  );
+  assert.ok(records[2].paths.every((filePath) => filePath.startsWith("/")), "the store keeps absolute paths");
+  assert.equal(records[2].changes.length, 2);
+  assert.equal(records[3].server, "docs");
+  assert.deepEqual(records[3].arguments, { query: "retry policy", limit: 3 });
+});
+
+test("output --trace numbers every action and keeps what the log truncates", () => {
+  const repo = makeTempDir();
+  const { job, env } = runTraceFixtureTask(repo);
+
+  const traced = run("node", [SCRIPT, "output", job.id, "--trace"], { cwd: repo, env });
+  assert.equal(traced.status, 0, traced.stderr);
+
+  assert.match(traced.stdout, /^1\. message {5}Planning the change\.$/m);
+  assert.match(traced.stdout, /^ {15}First lint, then edit\.$/m);
+  assert.match(traced.stdout, /^3\. fileChange {2}src\/retry\.js, src\/retry\.test\.js$/m);
+  assert.doesNotMatch(traced.stdout, /0ms/, "a duration the server reports as zero is noise, not data");
+  assert.match(traced.stdout, /^4\. tool {8}docs\/search \(completed\)$/m);
+  assert.match(traced.stdout, /^5\. message /m);
+
+  // The trace carries the whole command; the human log only ever had 96 characters of it.
+  assert.ok(TRACE_FIXTURE_COMMAND.length > 96);
+  assert.ok(traced.stdout.includes(`2. command     ${TRACE_FIXTURE_COMMAND} (exit 0, 1.2s)`), traced.stdout);
+  const log = fs.readFileSync(job.logFile, "utf8");
+  assert.ok(!log.includes(TRACE_FIXTURE_COMMAND), log);
+
+  // Level 2 is what was done, never the output or the diff behind it.
+  assert.doesNotMatch(traced.stdout, /lint: 0 warnings/);
+  assert.doesNotMatch(traced.stdout, /const attempts/);
+  assert.doesNotMatch(traced.stdout, /@@/);
+  assert.doesNotMatch(traced.stdout, /retry policy", "limit/);
+});
+
+test("output --step returns the whole record behind one trace line", () => {
+  const repo = makeTempDir();
+  const { job, env } = runTraceFixtureTask(repo);
+  const step = (n) => run("node", [SCRIPT, "output", job.id, "--step", String(n)], { cwd: repo, env });
+
+  const command = step(2);
+  assert.equal(command.status, 0, command.stderr);
+  assert.match(command.stdout, /^Step 2: command at /m);
+  assert.match(command.stdout, /^Status: completed, exit 0, 1\.2s$/m);
+  assert.match(command.stdout, /^lint: 0 warnings\ntest: 12 passed\ntrace fixture command finished$/m);
+
+  const fileChange = step(3);
+  assert.equal(fileChange.status, 0, fileChange.stderr);
+  assert.match(fileChange.stdout, /src\/retry\.js \(update\)$/m);
+  assert.match(fileChange.stdout, /^-const attempts = 1;$/m);
+  assert.match(fileChange.stdout, /src\/retry\.test\.js \(add\)$/m);
+  assert.match(fileChange.stdout, /^\+test\('retries three times', \(\) => \{\}\);$/m);
+
+  const tool = step(4);
+  assert.equal(tool.status, 0, tool.stderr);
+  assert.match(tool.stdout, /^Tool: docs\/search$/m);
+  assert.match(tool.stdout, /^Arguments:\n\{\n {2}"query": "retry policy",\n {2}"limit": 3\n\}$/m);
+  assert.match(tool.stdout, /^Result:\n\{\n {2}"hits": \[\n {4}"docs\/retry\.md"\n {2}\]\n\}$/m);
+});
+
+test("output rejects a step outside the trace and --trace with --step", () => {
+  const repo = makeTempDir();
+  const { job, env } = runTraceFixtureTask(repo);
+
+  const outOfRange = run("node", [SCRIPT, "output", job.id, "--step", "99"], { cwd: repo, env });
+  assert.equal(outOfRange.status, 1);
+  assert.match(outOfRange.stderr, new RegExp(`Step 99 is out of range for job ${job.id}; valid steps are 1-5\\.`));
+
+  const both = run("node", [SCRIPT, "output", job.id, "--trace", "--step", "1"], { cwd: repo, env });
+  assert.equal(both.status, 1);
+  assert.match(both.stderr, /Use either --trace or --step <n>, not both\./);
+});
+
+test("output --trace says so when a job has no event store", () => {
+  const workspace = makeTempDir();
+  const stateDir = resolveStateDir(workspace);
+  const jobsDir = path.join(stateDir, "jobs");
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  const logFile = path.join(jobsDir, "task-legacy.log");
+  fs.writeFileSync(logFile, "[2026-03-18T15:30:00.000Z] Starting Codex Task.\n", "utf8");
+  fs.writeFileSync(
+    path.join(jobsDir, "task-legacy.json"),
+    `${JSON.stringify({ id: "task-legacy", status: "completed", title: "Codex Task", logFile, rendered: "old result\n" }, null, 2)}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(stateDir, "state.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        config: { stopReviewGate: false },
+        jobs: [
+          {
+            id: "task-legacy",
+            status: "completed",
+            phase: "done",
+            title: "Codex Task",
+            jobClass: "task",
+            logFile,
+            createdAt: "2026-03-18T15:30:00.000Z",
+            updatedAt: "2026-03-18T15:30:02.000Z"
+          }
+        ]
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+
+  const traced = run("node", [SCRIPT, "output", "task-legacy"], { cwd: workspace });
+  assert.equal(traced.status, 0, traced.stderr);
+
+  const withTrace = run("node", [SCRIPT, "output", "task-legacy", "--trace"], { cwd: workspace });
+  assert.equal(withTrace.status, 0, withTrace.stderr);
+  assert.match(withTrace.stdout, /^No trace recorded for this job\.$/m);
+});
+
 test("output --since reads the log forward from a line offset", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

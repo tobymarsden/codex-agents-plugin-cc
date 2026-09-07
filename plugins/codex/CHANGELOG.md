@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0
+
+- Every job now writes a structured event store beside its log, one JSON record per completed action, carrying the full command, the changed paths and their diffs, tool arguments and results, and the agent's messages
+- `output --trace` (`TaskOutput`'s `trace`) prints a numbered line per action: the full command, the edited paths, the messages in full
+- `output --step <n>` (`TaskOutput`'s `step`) prints the whole record behind one of those lines, including a command's output and an edit's diffs
+- A pruned job's event store is deleted with its log
+
 ## 1.4.1
 
 - Messages that reach a tool caller name the action rather than CLI syntax: the log pointer says `use tail`, and the two refusals that an `Agent` or `SendMessage` call can hit name both routes
