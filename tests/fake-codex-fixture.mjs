@@ -181,6 +181,28 @@ function saveImportLedger(ledger) {
   fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
 }
 
+// One notification per turn: "last" is this turn's own usage, "total" is the thread's
+// running sum, so a second turn on the same thread proves the per-job delta.
+const TURN_TOKEN_USAGE = { inputTokens: 1200, cachedInputTokens: 300, outputTokens: 80, reasoningOutputTokens: 40, totalTokens: 1280, cacheWriteInputTokens: 0 };
+
+function emitTokenUsage(threadId, turnId) {
+  const state = loadState();
+  const thread = state.threads.find((entry) => entry.id === threadId);
+  if (!thread) {
+    return;
+  }
+  thread.completedTurns = (thread.completedTurns || 0) + 1;
+  saveState(state);
+  const total = {};
+  for (const key of Object.keys(TURN_TOKEN_USAGE)) {
+    total[key] = TURN_TOKEN_USAGE[key] * thread.completedTurns;
+  }
+  send({
+    method: "thread/tokenUsage/updated",
+    params: { threadId, turnId, tokenUsage: { last: TURN_TOKEN_USAGE, total, modelContextWindow: 272000 } }
+  });
+}
+
 function emitTurnCompleted(threadId, turnId, item) {
   const items = Array.isArray(item) ? item : [item];
   send({ method: "turn/started", params: { threadId, turn: buildTurn(turnId) } });
@@ -192,6 +214,7 @@ function emitTurnCompleted(threadId, turnId, item) {
       send({ method: "item/completed", params: { threadId, turnId, item: entry.completed } });
     }
   }
+  emitTokenUsage(threadId, turnId);
   send({ method: "turn/completed", params: { threadId, turn: buildTurn(turnId, "completed") } });
 }
 
@@ -336,7 +359,7 @@ rl.on("line", (line) => {
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
         state.lastThreadStart = { threadId: thread.id, sandbox: message.params.sandbox ?? null };
         saveState(state);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-test", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: message.params.effort ?? "medium" } });
         send({ method: "thread/started", params: { thread: { id: thread.id } } });
         break;
       }
@@ -371,7 +394,7 @@ rl.on("line", (line) => {
         thread.updatedAt = now();
         state.lastThreadStart = { threadId: thread.id, sandbox: message.params.sandbox ?? null };
         saveState(state);
-        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+        send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-test", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: message.params.effort ?? "medium" } });
         break;
       }
 
@@ -628,6 +651,7 @@ rl.on("line", (line) => {
 	                send({ method: "item/completed", params: { threadId: thread.id, turnId, item: entry.completed } });
 	              }
 	            }
+	            emitTokenUsage(pending.threadId, turnId);
 	            send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
 	          }, 5000);
 	          interruptibleTurns.set(turnId, pending);

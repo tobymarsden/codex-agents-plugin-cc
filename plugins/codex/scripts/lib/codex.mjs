@@ -31,6 +31,8 @@
  *   messages: Array<{ lifecycle: string, phase: string | null, text: string }>,
  *   fileChanges: ThreadItem[],
  *   commandExecutions: ThreadItem[],
+ *   tokenTotals: Record<string, number> | null,
+ *   modelContextWindow: number | null,
  *   onProgress: ProgressReporter | null
  * }} TurnCaptureState
  */
@@ -332,8 +334,41 @@ function createTurnCaptureState(threadId, options = {}) {
     messages: [],
     fileChanges: [],
     commandExecutions: [],
+    tokenTotals: null,
+    modelContextWindow: null,
     onProgress: options.onProgress ?? null
   };
+}
+
+const TOKEN_USAGE_FIELDS = ["inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"];
+
+/**
+ * `thread/tokenUsage/updated.total` is a running sum over the whole thread, so a resumed
+ * job would over-report. `last` is the most recent model request, so summing the `last`
+ * breakdowns seen during this turn gives the turn's own usage. Probed 2026-09-07; see
+ * PARITY.md § 6b.
+ */
+function recordTokenUsage(state, usage) {
+  const last = usage?.last;
+  if (last) {
+    const totals = state.tokenTotals ?? Object.fromEntries(TOKEN_USAGE_FIELDS.map((field) => [field, 0]));
+    for (const field of TOKEN_USAGE_FIELDS) {
+      totals[field] += Number(last[field] ?? 0);
+    }
+    state.tokenTotals = totals;
+  }
+  if (usage?.modelContextWindow != null) {
+    state.modelContextWindow = usage.modelContextWindow;
+  }
+}
+
+function buildTurnTokenUsage(state) {
+  if (!state.tokenTotals) {
+    return null;
+  }
+  return state.modelContextWindow == null
+    ? { ...state.tokenTotals }
+    : { ...state.tokenTotals, modelContextWindow: state.modelContextWindow };
 }
 
 function clearCompletionTimer(state) {
@@ -532,6 +567,11 @@ function applyTurnNotification(state, message) {
       {
         const update = describeCompletedItem(state, message.params.item);
         emitProgress(state.onProgress, update?.message, update?.phase ?? null);
+      }
+      break;
+    case "thread/tokenUsage/updated":
+      if ((message.params.threadId ?? null) === state.rootThreadId) {
+        recordTokenUsage(state, message.params.tokenUsage);
       }
       break;
     case "error":
@@ -1069,8 +1109,12 @@ export async function runAppServerReview(cwd, options = {}) {
       threadName: options.threadName
     });
     const sourceThreadId = thread.thread.id;
+    const model = thread.model ?? null;
+    const effort = thread.reasoningEffort ?? null;
     emitProgress(options.onProgress, `Thread ready (${sourceThreadId}).`, "starting", {
-      threadId: sourceThreadId
+      threadId: sourceThreadId,
+      model,
+      effort
     });
     const delivery = options.delivery ?? "inline";
 
@@ -1101,6 +1145,9 @@ export async function runAppServerReview(cwd, options = {}) {
       threadId: turnState.threadId,
       sourceThreadId,
       turnId: turnState.turnId,
+      model,
+      effort,
+      tokenUsage: buildTurnTokenUsage(turnState),
       reviewText: turnState.reviewText,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,
@@ -1154,29 +1201,34 @@ export async function runAppServerTurn(cwd, options = {}) {
   }
 
   return withAppServer(cwd, async (client) => {
-    let threadId;
+    let response;
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
-      const response = await resumeThread(client, options.resumeThreadId, cwd, {
+      response = await resumeThread(client, options.resumeThreadId, cwd, {
         model: options.model,
         sandbox: options.sandbox,
         ephemeral: false
       });
-      threadId = response.thread.id;
     } else {
       emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
-      const response = await startThread(client, cwd, {
+      response = await startThread(client, cwd, {
         model: options.model,
         sandbox: options.sandbox,
         ephemeral: options.persistThread ? false : true,
         threadName: options.persistThread ? options.threadName : options.threadName ?? null
       });
-      threadId = response.thread.id;
     }
 
+    const threadId = response.thread.id;
+    // The response carries the resolved model even when the request sent null.
+    const model = response.model ?? null;
+    const effort = response.reasoningEffort ?? null;
+
     emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
-      threadId
+      threadId,
+      model,
+      effort
     });
 
     const prompt = options.prompt?.trim() || options.defaultPrompt || "";
@@ -1202,6 +1254,9 @@ export async function runAppServerTurn(cwd, options = {}) {
       status: buildResultStatus(turnState),
       threadId,
       turnId: turnState.turnId,
+      model,
+      effort,
+      tokenUsage: buildTurnTokenUsage(turnState),
       finalMessage: turnState.lastAgentMessage,
       reasoningSummary: turnState.reasoningSummary,
       turn: turnState.finalTurn,

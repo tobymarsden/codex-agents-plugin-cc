@@ -77,11 +77,25 @@ function shorten(text, limit) {
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 3)}...`;
 }
 
+const CWD_SCHEMA = { type: "string", description: "Workspace directory for the job; defaults to the server's working directory." };
+
+/** Returns the `--cwd <dir>` flags every CLI call in a tool run must carry, or []. */
+function cwdFlags(args) {
+  if (args?.cwd === undefined || args.cwd === null || args.cwd === "") {
+    return [];
+  }
+  const resolved = path.resolve(process.cwd(), String(args.cwd));
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    throw new Error(`cwd ${resolved} is not an existing directory.`);
+  }
+  return ["--cwd", resolved];
+}
+
 const TOOLS = [
   {
     name: "Agent",
     description:
-      "Run a Codex task in this workspace. Returns the result, or with run_in_background a job id to use with TaskOutput, SendMessage, and TaskStop.",
+      "Run a Codex task in this workspace. Returns the result, or with run_in_background a job id to use with TaskOutput, SendMessage, and TaskStop. cwd sets the workspace.",
     inputSchema: {
       type: "object",
       properties: {
@@ -90,13 +104,15 @@ const TOOLS = [
         write: { type: "boolean", description: "Give Codex full write access with no sandbox." },
         model: { type: "string", description: "Codex model to use." },
         effort: { type: "string", description: "Reasoning effort: none, minimal, low, medium, high, or xhigh." },
-        resume: { type: "string", description: "Job id whose Codex thread this task continues." }
+        resume: { type: "string", description: "Job id whose Codex thread this task continues." },
+        cwd: CWD_SCHEMA
       },
       required: ["prompt"]
     },
     async run(args) {
       const prompt = requireString(args, "prompt");
-      const flags = [];
+      const workspace = cwdFlags(args);
+      const flags = [...workspace];
       if (args.run_in_background) {
         flags.push("--background");
       }
@@ -118,7 +134,11 @@ const TOOLS = [
       }
 
       const payload = await cliJson(["task", ...flags, "--json", prompt]);
-      return `Started Codex job ${payload.jobId}. Use TaskOutput to read it.`;
+      return (
+        `Started Codex job ${payload.jobId}. Read it with TaskOutput. ` +
+        "To be woken when it finishes instead of polling, run this under a background Bash call:\n" +
+        `node ${JSON.stringify(COMPANION_SCRIPT)} output ${payload.jobId} --wait 3600000${workspace.length > 0 ? ` --cwd ${workspace[1]}` : ""}`
+      );
     }
   },
   {
@@ -130,22 +150,24 @@ const TOOLS = [
       properties: {
         to: { type: "string", description: "Job id to send the message to." },
         message: { type: "string", description: "Text to deliver to the job." },
-        summary: { type: "string", description: "Accepted for parity with the native tool; unused." }
+        summary: { type: "string", description: "Accepted for parity with the native tool; unused." },
+        cwd: CWD_SCHEMA
       },
       required: ["to", "message"]
     },
     async run(args) {
       const to = requireString(args, "to");
       const message = requireString(args, "message");
-      const { job } = await cliJson(["output", to, "--json", "--tail", "0"]);
+      const workspace = cwdFlags(args);
+      const { job } = await cliJson(["output", to, ...workspace, "--json", "--tail", "0"]);
 
       if (job.status === "running") {
-        const steered = await cliJson(["steer", to, "--json", message]);
+        const steered = await cliJson(["steer", to, ...workspace, "--json", message]);
         return `Steered job ${to} (turn ${steered.turnId}).`;
       }
 
       if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
-        const resumed = await cliJson(["task", "--background", "--job", to, "--json", message]);
+        const resumed = await cliJson(["task", "--background", "--job", to, ...workspace, "--json", message]);
         return `Resumed job ${to} as ${resumed.jobId} (same Codex thread). Use TaskOutput ${resumed.jobId} to read it.`;
       }
 
@@ -155,23 +177,25 @@ const TOOLS = [
   {
     name: "TaskOutput",
     description:
-      "Read a Codex job's output: its status, live thread state, recent log, and final result. block waits until it finishes or timeout.",
+      "Read a Codex job's output: its status, model and tokens, live thread state, recent log, and final result. block waits until it finishes or timeout. For a completion notification instead of polling, run the output --wait command that Agent printed under a background Bash call.",
     inputSchema: {
       type: "object",
       properties: {
         task_id: { type: "string", description: "Job id to read." },
         block: { type: "boolean", description: "Wait for the job to finish; defaults to true." },
-        timeout: { type: "number", description: "Milliseconds to wait when blocking; defaults to 240000." }
+        timeout: { type: "number", description: "Milliseconds to wait when blocking; defaults to 240000." },
+        cwd: CWD_SCHEMA
       },
       required: ["task_id"]
     },
     async run(args) {
       const taskId = requireString(args, "task_id");
+      const workspace = cwdFlags(args);
       if (args.block === false) {
-        return cliText(["output", taskId]);
+        return cliText(["output", taskId, ...workspace]);
       }
       const timeout = args.timeout ?? DEFAULT_OUTPUT_TIMEOUT_MS;
-      return cliText(["output", taskId, "--wait", String(timeout)]);
+      return cliText(["output", taskId, ...workspace, "--wait", String(timeout)]);
     }
   },
   {
@@ -180,12 +204,13 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        task_id: { type: "string", description: "Job id to stop." }
+        task_id: { type: "string", description: "Job id to stop." },
+        cwd: CWD_SCHEMA
       },
       required: ["task_id"]
     },
     async run(args) {
-      return cliText(["cancel", requireString(args, "task_id")]);
+      return cliText(["cancel", requireString(args, "task_id"), ...cwdFlags(args)]);
     }
   },
   {
@@ -193,11 +218,12 @@ const TOOLS = [
     description: "List this session's Codex jobs with status, phase, elapsed time, and whether each accepts input.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: { cwd: CWD_SCHEMA },
       required: []
     },
-    async run() {
-      const report = await cliJson(["status", "--all", "--json"]);
+    async run(args) {
+      const workspace = cwdFlags(args);
+      const report = await cliJson(["status", "--all", ...workspace, "--json"]);
       const jobs = [...report.running, ...(report.latestFinished ? [report.latestFinished] : []), ...report.recent];
       if (jobs.length === 0) {
         return "No Codex jobs in this session.";
@@ -208,8 +234,14 @@ const TOOLS = [
       for (const job of jobs) {
         const timing = job.duration ?? job.elapsed ?? "-";
         let line = `${job.id}  ${job.status}/${job.phase}  ${timing}  ${shorten(job.summary, SUMMARY_LIMIT)}`;
+        if (job.model) {
+          line += `  ${job.model}`;
+        }
+        if (job.tokenUsage?.totalTokens != null) {
+          line += `  ${job.tokenUsage.totalTokens}tok`;
+        }
         if (active.has(job.id)) {
-          const { thread } = await cliJson(["output", job.id, "--json", "--tail", "0"]);
+          const { thread } = await cliJson(["output", job.id, ...workspace, "--json", "--tail", "0"]);
           if (thread) {
             line += `  thread:${thread.status?.type ?? "unknown"}${thread.canAcceptDirectInput ? ",accepts-input" : ""}`;
           }

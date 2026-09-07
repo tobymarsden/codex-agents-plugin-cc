@@ -265,12 +265,22 @@ function isFinalJobStatus(status) {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 
+const FINAL_OUTPUT_LOG_LINE = /^\[[^\]]+\] Final output$/;
+
 function readJobLogTail(logFile, maxLines) {
   if (!logFile || !fs.existsSync(logFile)) {
     return [];
   }
 
   const lines = fs.readFileSync(logFile, "utf8").split(/\r?\n/);
+
+  // The trailing "Final output" block repeats the stored result, which callers render
+  // separately, so drop it (and the blank line the block starts with) before tailing.
+  const finalOutputIndex = lines.findIndex((line) => FINAL_OUTPUT_LOG_LINE.test(line));
+  if (finalOutputIndex >= 0) {
+    lines.length = finalOutputIndex > 0 && lines[finalOutputIndex - 1] === "" ? finalOutputIndex - 1 : finalOutputIndex;
+  }
+
   while (lines.length > 0 && lines[lines.length - 1] === "") {
     lines.pop();
   }

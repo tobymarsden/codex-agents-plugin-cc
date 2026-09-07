@@ -387,10 +387,37 @@ export function renderJobStatusReport(job) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+function formatTokenCount(value) {
+  const count = Number(value ?? 0);
+  return count > 9999 ? `${(count / 1000).toFixed(1)}k` : String(count);
+}
+
+/** `Model: <model> (<effort>)  Tokens: …`, or null when neither is known. */
+export function renderJobMetaLine(job) {
+  const parts = [];
+  if (job?.model) {
+    parts.push(`Model: ${job.model}${job.effort ? ` (${job.effort})` : ""}`);
+  }
+  const usage = job?.tokenUsage;
+  if (usage) {
+    parts.push(
+      `Tokens: ${formatTokenCount(usage.totalTokens)} total, ` +
+        `${formatTokenCount(usage.inputTokens)} in (${formatTokenCount(usage.cachedInputTokens)} cached), ` +
+        `${formatTokenCount(usage.outputTokens)} out (${formatTokenCount(usage.reasoningOutputTokens)} reasoning)`
+    );
+  }
+  return parts.length > 0 ? parts.join("  ") : null;
+}
+
 export function renderJobOutput(snapshot, waitTimeoutMs = null) {
   const job = snapshot.job;
   const timing = job.status === "queued" || job.status === "running" ? job.elapsed : job.duration;
   const lines = [`Job ${job.id}: ${job.status} (${job.phase}${timing ? `, ${timing}` : ""})`];
+
+  const metaLine = renderJobMetaLine(job);
+  if (metaLine) {
+    lines.push(metaLine);
+  }
 
   if (snapshot.thread) {
     const acceptsInput = snapshot.thread.canAcceptDirectInput ? ", accepts input" : "";
@@ -413,12 +440,16 @@ export function renderJobOutput(snapshot, waitTimeoutMs = null) {
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
+  const metaLine = renderJobMetaLine(storedJob ?? job);
+  const footerLines = [
+    ...(metaLine ? [metaLine] : []),
+    ...(threadId ? [`Codex session ID: ${threadId}`, `Resume in Codex: ${resumeCommand}`] : [])
+  ];
+  const footer = footerLines.length > 0 ? `\n${footerLines.join("\n")}\n` : "";
+  const withFooter = (text) => `${text.endsWith("\n") ? text : `${text}\n`}${footer}`;
+
   if (isStructuredReviewStoredResult(storedJob) && storedJob?.rendered) {
-    const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
-    if (!threadId) {
-      return output;
-    }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return withFooter(storedJob.rendered);
   }
 
   const rawOutput =
@@ -426,32 +457,20 @@ export function renderStoredJobResult(job, storedJob) {
     (typeof storedJob?.result?.codex?.stdout === "string" && storedJob.result.codex.stdout) ||
     "";
   if (rawOutput) {
-    const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
-    if (!threadId) {
-      return output;
-    }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return withFooter(rawOutput);
   }
 
   if (storedJob?.rendered) {
-    const output = storedJob.rendered.endsWith("\n") ? storedJob.rendered : `${storedJob.rendered}\n`;
-    if (!threadId) {
-      return output;
-    }
-    return `${output}\nCodex session ID: ${threadId}\nResume in Codex: ${resumeCommand}\n`;
+    return withFooter(storedJob.rendered);
   }
 
   const lines = [
     `# ${job.title ?? "Codex Result"}`,
     "",
     `Job: ${job.id}`,
-    `Status: ${job.status}`
+    `Status: ${job.status}`,
+    ...footerLines
   ];
-
-  if (threadId) {
-    lines.push(`Codex session ID: ${threadId}`);
-    lines.push(`Resume in Codex: ${resumeCommand}`);
-  }
 
   if (job.summary) {
     lines.push(`Summary: ${job.summary}`);

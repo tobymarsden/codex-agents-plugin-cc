@@ -124,6 +124,9 @@ test("agents MCP server speaks the protocol and lists exactly the five parity to
       tools.map((tool) => tool.inputSchema.required),
       [["prompt"], ["to", "message"], ["task_id"], ["task_id"], []]
     );
+    for (const tool of tools) {
+      assert.ok(tool.inputSchema.properties.cwd, `${tool.name} is missing cwd`);
+    }
 
     const unknown = await server.request("foo/bar", {});
     assert.equal(unknown.error.code, -32601);
@@ -233,6 +236,52 @@ test("agents MCP tools report refusals and unknown jobs as tool errors", async (
   } finally {
     await server.close();
   }
+});
+
+test("the Agent tool runs a job in the cwd it is given and prints the wake-up command", async () => {
+  const repo = makeTempDir();
+  const otherRepo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+  commitFixtureRepo(otherRepo);
+
+  const server = startServer(repo, binDir);
+  try {
+    await server.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+
+    const launched = await callTool(server, "Agent", {
+      prompt: "investigate the flaky worker timeout",
+      run_in_background: true,
+      cwd: otherRepo
+    });
+    assert.equal(launched.isError, false, launched.text);
+    const taskId = launched.text.match(/Started Codex job (task-[a-z0-9-]+)/)[1];
+    assert.match(launched.text, new RegExp(`--wait 3600000 --cwd ${otherRepo}$`));
+
+    // The job belongs to the other workspace's state dir, not the server's own.
+    assert.ok(readJobs(otherRepo).some((job) => job.id === taskId));
+    assert.equal(fs.existsSync(path.join(resolveStateDir(repo), "state.json")), false);
+
+    await waitFor(() => readJobs(otherRepo).find((job) => job.id === taskId && job.status === "completed"));
+
+    const listed = await callTool(server, "ListAgents", { cwd: otherRepo });
+    assert.equal(listed.isError, false, listed.text);
+    assert.match(listed.text, /gpt-test/);
+    assert.match(listed.text, /1280tok/);
+
+    const missingCwd = await callTool(server, "Agent", {
+      prompt: "should not run",
+      cwd: path.join(otherRepo, "no-such-directory")
+    });
+    assert.equal(missingCwd.isError, true, missingCwd.text);
+    assert.match(missingCwd.text, /no-such-directory is not an existing directory/);
+  } finally {
+    await server.close();
+  }
+
+  const cleanup = endSession(otherRepo, binDir);
+  assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
 test("the Agent tool runs a foreground Codex task and returns its result", async () => {

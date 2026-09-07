@@ -16,6 +16,8 @@ function normalizeProgressEvent(value) {
       phase: typeof value.phase === "string" && value.phase.trim() ? value.phase.trim() : null,
       threadId: typeof value.threadId === "string" && value.threadId.trim() ? value.threadId.trim() : null,
       turnId: typeof value.turnId === "string" && value.turnId.trim() ? value.turnId.trim() : null,
+      model: typeof value.model === "string" && value.model.trim() ? value.model.trim() : null,
+      effort: typeof value.effort === "string" && value.effort.trim() ? value.effort.trim() : null,
       stderrMessage: value.stderrMessage == null ? null : String(value.stderrMessage).trim(),
       logTitle: typeof value.logTitle === "string" && value.logTitle.trim() ? value.logTitle.trim() : null,
       logBody: value.logBody == null ? null : String(value.logBody).trimEnd()
@@ -27,6 +29,8 @@ function normalizeProgressEvent(value) {
     phase: null,
     threadId: null,
     turnId: null,
+    model: null,
+    effort: null,
     stderrMessage: String(value ?? "").trim(),
     logTitle: null,
     logBody: null
@@ -67,32 +71,23 @@ export function createJobRecord(base, options = {}) {
   };
 }
 
+const TRACKED_PROGRESS_FIELDS = ["phase", "threadId", "turnId", "model", "effort"];
+
 export function createJobProgressUpdater(workspaceRoot, jobId) {
-  let lastPhase = null;
-  let lastThreadId = null;
-  let lastTurnId = null;
+  const lastValues = new Map();
 
   return (event) => {
     const normalized = normalizeProgressEvent(event);
     const patch = { id: jobId };
     let changed = false;
 
-    if (normalized.phase && normalized.phase !== lastPhase) {
-      lastPhase = normalized.phase;
-      patch.phase = normalized.phase;
-      changed = true;
-    }
-
-    if (normalized.threadId && normalized.threadId !== lastThreadId) {
-      lastThreadId = normalized.threadId;
-      patch.threadId = normalized.threadId;
-      changed = true;
-    }
-
-    if (normalized.turnId && normalized.turnId !== lastTurnId) {
-      lastTurnId = normalized.turnId;
-      patch.turnId = normalized.turnId;
-      changed = true;
+    for (const field of TRACKED_PROGRESS_FIELDS) {
+      const value = normalized[field];
+      if (value && value !== lastValues.get(field)) {
+        lastValues.set(field, value);
+        patch[field] = value;
+        changed = true;
+      }
     }
 
     if (!changed) {
@@ -155,11 +150,17 @@ export async function runTrackedJob(job, runner, options = {}) {
     const execution = await runner();
     const completionStatus = execution.exitStatus === 0 ? "completed" : "failed";
     const completedAt = nowIso();
+    const runMetadata = {
+      threadId: execution.threadId ?? null,
+      turnId: execution.turnId ?? null,
+      model: execution.model ?? null,
+      effort: execution.effort ?? null,
+      tokenUsage: execution.tokenUsage ?? null
+    };
     writeJobFile(job.workspaceRoot, job.id, {
       ...runningRecord,
       status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
+      ...runMetadata,
       pid: null,
       phase: completionStatus === "completed" ? "done" : "failed",
       completedAt,
@@ -169,8 +170,7 @@ export async function runTrackedJob(job, runner, options = {}) {
     upsertJob(job.workspaceRoot, {
       id: job.id,
       status: completionStatus,
-      threadId: execution.threadId ?? null,
-      turnId: execution.turnId ?? null,
+      ...runMetadata,
       summary: execution.summary,
       phase: completionStatus === "completed" ? "done" : "failed",
       pid: null,

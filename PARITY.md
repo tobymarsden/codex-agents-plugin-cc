@@ -240,6 +240,18 @@ Two live probes against a direct `codex app-server` 0.153.4 before step 1:
 - `thread/queue/changed` was not emitted in either probe;
   `thread/status/changed` (`active` → `idle`) was. The fixture models only
   what was observed, so step 1 does not add `thread/queue/changed`.
+- `tokens-probe.mjs` (step 4 prep): one thread, two turns, five
+  `thread/tokenUsage/updated` notifications. Turn 1 (three `echo`s) gave
+  `last.totalTokens` 28999 / 29081 / 29163 / 29193 with `total.totalTokens`
+  28999 / 58080 / 87243 / 116436; turn 2 ("reply: again") gave one more,
+  `last` 34670 and `total` 151106. So **`last` is the single most recent
+  model request**, and **`total` is a running sum of every `last` on the
+  thread, carried across turns** (116436 + 34670 = 151106 exactly). A job's
+  own usage is therefore the sum of the `last` breakdowns seen during its
+  turn, which equals `total`'s delta over the turn; the raw `total` would
+  over-report a resumed job by the whole thread's prior history.
+  `thread/start` returned `model: "gpt-5.6-sol"`, `reasoningEffort: "high"`
+  at the response top level (also mirrored on `response.thread`).
 - Notification routing rule chosen for the broker: a notification carrying
   `params.threadId` goes to that thread's subscribers plus the socket that
   started its turn; a notification with no owner for its thread id, or no

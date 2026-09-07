@@ -2163,6 +2163,143 @@ test("output renders a finished job as text", () => {
   assert.match(rendered.stdout, /Handled the requested task/);
 });
 
+const EXPECTED_TOKEN_USAGE = {
+  inputTokens: 1200,
+  cachedInputTokens: 300,
+  outputTokens: 80,
+  reasoningOutputTokens: 40,
+  totalTokens: 1280,
+  modelContextWindow: 272000
+};
+
+const EXPECTED_META_LINE = "Model: gpt-test (medium)  Tokens: 1280 total, 1200 in (300 cached), 80 out (40 reasoning)";
+
+test("a finished task records the resolved model, effort, and its turn's token usage", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const finished = run("node", [SCRIPT, "task", "--json", "summarize the retry policy"], { cwd: repo, env });
+  assert.equal(finished.status, 0, finished.stderr);
+
+  const stateDir = resolveStateDir(repo);
+  const indexed = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
+    (job) => job.jobClass === "task"
+  );
+  assert.equal(indexed.model, "gpt-test");
+  assert.equal(indexed.effort, "medium");
+  assert.deepEqual(indexed.tokenUsage, EXPECTED_TOKEN_USAGE);
+
+  const stored = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${indexed.id}.json`), "utf8"));
+  assert.equal(stored.model, "gpt-test");
+  assert.equal(stored.effort, "medium");
+  assert.deepEqual(stored.tokenUsage, EXPECTED_TOKEN_USAGE);
+
+  const snapshot = JSON.parse(run("node", [SCRIPT, "output", indexed.id, "--json"], { cwd: repo, env }).stdout);
+  assert.equal(snapshot.job.model, "gpt-test");
+  assert.deepEqual(snapshot.job.tokenUsage, EXPECTED_TOKEN_USAGE);
+
+  const statusPayload = JSON.parse(run("node", [SCRIPT, "status", indexed.id, "--json"], { cwd: repo, env }).stdout);
+  assert.equal(statusPayload.job.effort, "medium");
+  assert.deepEqual(statusPayload.job.tokenUsage, EXPECTED_TOKEN_USAGE);
+
+  const resultPayload = JSON.parse(run("node", [SCRIPT, "result", indexed.id, "--json"], { cwd: repo, env }).stdout);
+  assert.equal(resultPayload.job.model, "gpt-test");
+  assert.deepEqual(resultPayload.storedJob.tokenUsage, EXPECTED_TOKEN_USAGE);
+
+  endFixtureSession(repo, env);
+});
+
+test("a resumed job reports its own turn's tokens, not the thread's running total", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const stateDir = resolveStateDir(repo);
+  const readIndex = () => JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs;
+
+  const first = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env });
+  assert.equal(first.status, 0, first.stderr);
+  const parentJob = readIndex().find((job) => job.jobClass === "task");
+
+  const resumed = run("node", [SCRIPT, "task", "--job", parentJob.id, "follow up"], { cwd: repo, env });
+  assert.equal(resumed.status, 0, resumed.stderr);
+
+  const childJob = readIndex().find((job) => job.parentJobId === parentJob.id);
+  // The fixture's thread-wide total is 2560 after the second turn; the job reports its delta.
+  assert.deepEqual(childJob.tokenUsage, EXPECTED_TOKEN_USAGE);
+  assert.equal(childJob.model, "gpt-test");
+
+  endFixtureSession(repo, env);
+});
+
+test("output text for a finished job shows the model line once and no duplicated final output", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const finishedJob = runFinishedFixtureTask(repo, env);
+  endFixtureSession(repo, env);
+
+  const rendered = run("node", [SCRIPT, "output", finishedJob.id], { cwd: repo, env });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.equal(rendered.stdout.split(EXPECTED_META_LINE).length - 1, 1);
+  assert.doesNotMatch(rendered.stdout, /^\[[^\]]+\] Final output$/m);
+  // Once in the live "Assistant message" log block, once as the trailing result. The
+  // third copy, the log's "Final output" block, is the one this cut removes.
+  assert.equal(rendered.stdout.split("Handled the requested task.\nTask prompt accepted.").length - 1, 2);
+  assert.ok(rendered.stdout.trimEnd().endsWith("Handled the requested task.\nTask prompt accepted."), rendered.stdout);
+
+  const snapshot = JSON.parse(run("node", [SCRIPT, "output", finishedJob.id, "--json"], { cwd: repo, env }).stdout);
+  assert.equal(
+    snapshot.log.filter((line) => /^\[[^\]]+\] Final output$/.test(line)).length,
+    0
+  );
+});
+
+test("result text for a finished job carries the model and token line", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const finishedJob = runFinishedFixtureTask(repo, env);
+  endFixtureSession(repo, env);
+
+  const rendered = run("node", [SCRIPT, "result", finishedJob.id], { cwd: repo, env });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.equal(rendered.stdout.split(EXPECTED_META_LINE).length - 1, 1);
+  assert.match(rendered.stdout, new RegExp(`${EXPECTED_META_LINE.replace(/[()]/g, "\\$&")}\\nCodex session ID:`));
+});
+
+test("a review job records its token usage too", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+  const env = buildEnv(binDir);
+  const review = run("node", [SCRIPT, "review"], { cwd: repo, env });
+  assert.equal(review.status, 0, review.stderr);
+
+  const stateDir = resolveStateDir(repo);
+  const reviewJob = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
+    (job) => job.jobClass === "review"
+  );
+  assert.equal(reviewJob.model, "gpt-test");
+  assert.deepEqual(reviewJob.tokenUsage, EXPECTED_TOKEN_USAGE);
+
+  endFixtureSession(repo, env);
+});
+
 test("session end fully cleans up jobs for the ending session", async (t) => {
   const repo = makeTempDir();
   initGitRepo(repo);
