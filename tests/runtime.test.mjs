@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { resolveStateDir } from "../plugins/codex/scripts/lib/state.mjs";
+import { resolveSessionFile, resolveStateDir, saveSessionId } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -764,6 +764,16 @@ test("session start hook exports the Claude session id, transcript path, and plu
     fs.readFileSync(envFile, "utf8"),
     `export CODEX_COMPANION_SESSION_ID='sess-current'\nexport CODEX_COMPANION_TRANSCRIPT_PATH='${transcriptPath}'\nexport CLAUDE_PLUGIN_DATA='${pluginDataDir}'\n`
   );
+  // The session file lands under the hook's own CLAUDE_PLUGIN_DATA, so resolve it with that env.
+  const previousPluginData = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = pluginDataDir;
+  const sessionFile = resolveSessionFile(repo);
+  if (previousPluginData === undefined) {
+    delete process.env.CLAUDE_PLUGIN_DATA;
+  } else {
+    process.env.CLAUDE_PLUGIN_DATA = previousPluginData;
+  }
+  assert.equal(JSON.parse(fs.readFileSync(sessionFile, "utf8")).sessionId, "sess-current");
 });
 
 test("write task output focuses on the Codex result without generic follow-up hints", () => {
@@ -2163,6 +2173,7 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
   const stateDir = resolveStateDir(repo);
   const jobsDir = path.join(stateDir, "jobs");
   fs.mkdirSync(jobsDir, { recursive: true });
+  saveSessionId(repo, "sess-current");
 
   const completedLog = path.join(jobsDir, "completed.log");
   const runningLog = path.join(jobsDir, "running.log");
@@ -2253,6 +2264,7 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
   });
 
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.existsSync(resolveSessionFile(repo)), false);
   assert.equal(fs.existsSync(otherSessionLog), true);
   assert.equal(fs.existsSync(otherJobFile), true);
   assert.deepEqual(

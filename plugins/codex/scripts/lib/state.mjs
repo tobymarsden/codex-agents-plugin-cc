@@ -9,6 +9,7 @@ const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
+const SESSION_FILE_NAME = "session.json";
 const LOCK_FILE_NAME = "state.lock";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
@@ -57,6 +58,31 @@ export function resolveJobsDir(cwd) {
 
 export function ensureStateDir(cwd) {
   fs.mkdirSync(resolveJobsDir(cwd), { recursive: true });
+}
+
+export function resolveSessionFile(cwd) {
+  return path.join(resolveStateDir(cwd), SESSION_FILE_NAME);
+}
+
+export function saveSessionId(cwd, sessionId) {
+  ensureStateDir(cwd);
+  fs.writeFileSync(resolveSessionFile(cwd), `${JSON.stringify({ sessionId }, null, 2)}\n`, "utf8");
+}
+
+export function loadSessionId(cwd) {
+  const sessionFile = resolveSessionFile(cwd);
+  if (!fs.existsSync(sessionFile)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(sessionFile, "utf8")).sessionId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function clearSessionId(cwd) {
+  removeFileIfExists(resolveSessionFile(cwd));
 }
 
 export function loadState(cwd) {

@@ -13,7 +13,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { loadState, resolveStateFile, saveState } from "./lib/state.mjs";
+import { clearSessionId, loadState, resolveStateFile, saveSessionId, saveState } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -78,6 +78,9 @@ function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
   appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
+  if (input.session_id) {
+    saveSessionId(input.cwd || process.cwd(), input.session_id);
+  }
 }
 
 async function handleSessionEnd(input) {
@@ -102,6 +105,7 @@ async function handleSessionEnd(input) {
   }
 
   cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
+  clearSessionId(cwd);
   teardownBrokerSession({
     endpoint: brokerEndpoint,
     pidFile,
