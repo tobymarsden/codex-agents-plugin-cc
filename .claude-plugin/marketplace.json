@@ -1,7 +1,7 @@
 {
-  "name": "openai-codex",
+  "name": "tobymarsden-codex",
   "owner": {
-    "name": "OpenAI"
+    "name": "Toby Marsden"
   },
   "metadata": {
     "description": "Codex plugins to use in Claude Code for delegation and code review.",
