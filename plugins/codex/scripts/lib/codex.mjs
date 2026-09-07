@@ -997,6 +997,29 @@ export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
   }
 }
 
+export async function steerAppServerTurn(cwd, { threadId, turnId, text }) {
+  const client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
+  try {
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: false });
+    if (thread.status?.type !== "active") {
+      throw new Error(`Codex thread ${threadId} is ${thread.status?.type ?? "unknown"}, so it has no active turn to steer.`);
+    }
+    // canAcceptDirectInput is emitted at runtime but is absent from the generated Thread type.
+    if (/** @type {{ canAcceptDirectInput?: boolean }} */ (thread).canAcceptDirectInput === false) {
+      throw new Error(`Codex thread ${threadId} reports canAcceptDirectInput: false, so it refuses direct input.`);
+    }
+
+    const response = await client.request("turn/steer", {
+      threadId,
+      expectedTurnId: turnId,
+      input: buildTurnInput(text)
+    });
+    return { turnId: response.turnId };
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
 export async function runAppServerReview(cwd, options = {}) {
   const availability = getCodexAvailability(cwd);
   if (!availability.available) {

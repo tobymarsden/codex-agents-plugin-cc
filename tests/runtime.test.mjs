@@ -503,6 +503,74 @@ test("task --resume-last resumes the latest persisted task thread", () => {
   assert.equal(result.stdout, "Resumed the prior run.\nFollow-up prompt accepted.\n");
 });
 
+test("task --job resumes the referenced job's thread as a linked child job", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = buildEnv(binDir);
+  const stateDir = resolveStateDir(repo);
+  const readIndex = () => JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+
+  const firstRun = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+  const firstJob = readIndex().jobs.find((job) => job.jobClass === "task");
+  assert.ok(firstJob.threadId);
+
+  const resumed = run("node", [SCRIPT, "task", "--job", firstJob.id, "follow up"], { cwd: repo, env });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.match(resumed.stdout, /Resumed the prior run/);
+  assert.equal(JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastTurnStart.threadId, firstJob.threadId);
+
+  const childJob = readIndex().jobs.find((job) => job.parentJobId);
+  assert.equal(childJob.parentJobId, firstJob.id);
+  const childRecord = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${childJob.id}.json`), "utf8"));
+  assert.equal(childRecord.parentJobId, firstJob.id);
+
+  const byPrefix = run("node", [SCRIPT, "task", "--job", firstJob.id.slice(0, -3), "follow up again"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(byPrefix.status, 0, byPrefix.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastTurnStart.threadId, firstJob.threadId);
+
+  const conflict = run("node", [SCRIPT, "task", "--job", firstJob.id, "--fresh", "follow up"], { cwd: repo, env });
+  assert.equal(conflict.status, 1);
+  assert.match(conflict.stderr, /Choose one of --job, --resume, or --fresh\./);
+});
+
+test("write-capable task runs Codex with full access instead of a workspace sandbox", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const env = buildEnv(binDir);
+  const firstRun = run("node", [SCRIPT, "task", "--write", "fix the failing test"], { cwd: repo, env });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastThreadStart.sandbox, "danger-full-access");
+
+  const stateDir = resolveStateDir(repo);
+  const firstJob = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
+    (job) => job.jobClass === "task"
+  );
+
+  const resumed = run("node", [SCRIPT, "task", "--job", firstJob.id, "--write", "follow up"], { cwd: repo, env });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.equal(fakeState.lastThreadStart.threadId, firstJob.threadId);
+  assert.equal(fakeState.lastThreadStart.sandbox, "danger-full-access");
+});
+
 test("task-resume-candidate returns the latest rescue thread from the current session", () => {
   const workspace = makeTempDir();
   const stateDir = resolveStateDir(workspace);
@@ -1799,6 +1867,152 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
     })
   });
   assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+function commitFixtureRepo(repo) {
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+}
+
+async function launchRunningBackgroundTask(repo, env) {
+  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the flaky worker timeout"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(launched.status, 0, launched.stderr);
+  const jobId = JSON.parse(launched.stdout).jobId;
+  const stateDir = resolveStateDir(repo);
+
+  return waitFor(() => {
+    const state = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8"));
+    const job = state.jobs.find((candidate) => candidate.id === jobId);
+    return job?.status === "running" && job.threadId && job.turnId ? job : null;
+  }, { timeoutMs: 15000 });
+}
+
+function endFixtureSession(repo, env) {
+  const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env,
+    input: JSON.stringify({ hook_event_name: "SessionEnd", cwd: repo })
+  });
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+}
+
+test("task --job refuses a job that is still running and points at steer", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const runningJob = await launchRunningBackgroundTask(repo, env);
+
+  const refused = run("node", [SCRIPT, "task", "--job", runningJob.id, "keep going"], { cwd: repo, env });
+  assert.equal(refused.status, 1);
+  assert.match(
+    refused.stderr,
+    new RegExp(`Job ${runningJob.id} is still running\\. Use steer ${runningJob.id} <text>`)
+  );
+
+  const cancelled = run("node", [SCRIPT, "cancel", runningJob.id, "--json"], { cwd: repo, env });
+  assert.equal(cancelled.status, 0, cancelled.stderr);
+  endFixtureSession(repo, env);
+});
+
+test("steer adds input to the running turn of a background job", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const runningJob = await launchRunningBackgroundTask(repo, env);
+
+  const steered = run("node", [SCRIPT, "steer", runningJob.id, "change course", "--json"], { cwd: repo, env });
+  assert.equal(steered.status, 0, steered.stderr);
+  const payload = JSON.parse(steered.stdout);
+  assert.equal(payload.jobId, runningJob.id);
+  assert.equal(payload.turnId, runningJob.turnId);
+  assert.equal(payload.text, "change course");
+
+  assert.equal(JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastSteer.text, "change course");
+  assert.match(fs.readFileSync(runningJob.logFile, "utf8"), /Steered: change course/);
+
+  const waited = run(
+    "node",
+    [SCRIPT, "status", runningJob.id, "--wait", "--timeout-ms", "20000", "--json"],
+    { cwd: repo, env }
+  );
+  assert.equal(waited.status, 0, waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).job.status, "completed");
+
+  const finished = await waitFor(() => {
+    const result = run("node", [SCRIPT, "result", runningJob.id], { cwd: repo, env });
+    return result.status === 0 ? result : null;
+  });
+  assert.match(finished.stdout, /Steered: change course/);
+
+  endFixtureSession(repo, env);
+});
+
+test("steer refuses a job whose turn cannot take direct input", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "interruptible-slow-task-parent-owned");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const runningJob = await launchRunningBackgroundTask(repo, env);
+
+  const refused = run("node", [SCRIPT, "steer", runningJob.id, "change course"], { cwd: repo, env });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /canAcceptDirectInput/);
+  assert.equal(JSON.parse(fs.readFileSync(fakeStatePath, "utf8")).lastSteer, null);
+
+  const cancelled = run("node", [SCRIPT, "cancel", runningJob.id, "--json"], { cwd: repo, env });
+  assert.equal(cancelled.status, 0, cancelled.stderr);
+  endFixtureSession(repo, env);
+});
+
+test("steer refuses jobs that are not running a Codex turn", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const firstRun = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env });
+  assert.equal(firstRun.status, 0, firstRun.stderr);
+
+  const stateDir = resolveStateDir(repo);
+  const statePath = path.join(stateDir, "state.json");
+  const finishedJob = JSON.parse(fs.readFileSync(statePath, "utf8")).jobs.find((job) => job.jobClass === "task");
+
+  const refusedFinished = run("node", [SCRIPT, "steer", finishedJob.id, "change course"], { cwd: repo, env });
+  assert.equal(refusedFinished.status, 1);
+  assert.match(refusedFinished.stderr, /is completed; only a running job can be steered\./);
+  assert.match(refusedFinished.stderr, new RegExp(`Use task --job ${finishedJob.id} to continue it\\.`));
+
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  state.jobs.unshift({
+    id: "task-queued",
+    status: "queued",
+    title: "Codex Task",
+    jobClass: "task",
+    summary: "Queued run",
+    updatedAt: "2126-03-24T20:00:00.000Z"
+  });
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+
+  const refusedQueued = run("node", [SCRIPT, "steer", "task-queued", "change course"], { cwd: repo, env });
+  assert.equal(refusedQueued.status, 1);
+  assert.match(refusedQueued.stderr, /Job task-queued is queued; only a running job can be steered\./);
+  assert.doesNotMatch(refusedQueued.stderr, /task --job/);
 });
 
 test("session end fully cleans up jobs for the ending session", async (t) => {

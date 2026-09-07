@@ -15,6 +15,8 @@ const readline = require("node:readline");
 
 	const STATE_PATH = ${JSON.stringify(statePath)};
 	const BEHAVIOR = ${JSON.stringify(behavior)};
+	const INTERRUPTIBLE = BEHAVIOR.startsWith("interruptible-slow-task");
+	const PARENT_OWNED = BEHAVIOR === "interruptible-slow-task-parent-owned";
 	const interruptibleTurns = new Map();
 
 	function loadState() {
@@ -332,6 +334,8 @@ rl.on("line", (line) => {
           throw new Error("thread/start.persistFullHistory requires experimentalApi capability");
         }
         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
+        state.lastThreadStart = { threadId: thread.id, sandbox: message.params.sandbox ?? null };
+        saveState(state);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
         send({ method: "thread/started", params: { thread: { id: thread.id } } });
         break;
@@ -365,6 +369,7 @@ rl.on("line", (line) => {
         }
         const thread = ensureThread(state, message.params.threadId);
         thread.updatedAt = now();
+        state.lastThreadStart = { threadId: thread.id, sandbox: message.params.sandbox ?? null };
         saveState(state);
         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
         break;
@@ -607,7 +612,7 @@ rl.on("line", (line) => {
           }
         ];
 
-	        if (BEHAVIOR === "interruptible-slow-task") {
+	        if (INTERRUPTIBLE) {
 	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
 	          const pending = { turnId, threadId: thread.id, steerText: null, timer: null };
 	          pending.timer = setTimeout(() => {
@@ -636,6 +641,9 @@ rl.on("line", (line) => {
 
 	      case "turn/steer": {
 	        const thread = ensureThread(state, message.params.threadId);
+	        if (PARENT_OWNED) {
+	          throw new Error("parent-owned subagent rejects direct steering");
+	        }
 	        const inFlight = activeTurn(thread.id);
 	        if (!inFlight || inFlight.turnId !== message.params.expectedTurnId) {
 	          throw new Error("expectedTurnId " + message.params.expectedTurnId + " is not the active turn");
@@ -648,7 +656,7 @@ rl.on("line", (line) => {
 	      case "thread/read": {
 	        const thread = ensureThread(state, message.params.threadId);
 	        const status = activeTurn(thread.id) ? { type: "active", activeFlags: [] } : { type: "idle" };
-	        send({ id: message.id, result: { thread: { ...buildThread(thread), status, canAcceptDirectInput: true } } });
+	        send({ id: message.id, result: { thread: { ...buildThread(thread), status, canAcceptDirectInput: !PARENT_OWNED } } });
 	        break;
 	      }
 

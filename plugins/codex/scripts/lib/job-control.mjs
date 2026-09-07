@@ -210,6 +210,12 @@ function matchJobReference(jobs, reference, predicate = () => true) {
   throw new Error(`No job found for "${reference}". Run /codex:status to list known jobs.`);
 }
 
+export function resolveJobReference(cwd, reference) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  return { workspaceRoot, job: matchJobReference(jobs, reference) };
+}
+
 export function buildStatusSnapshot(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const config = getConfig(workspaceRoot);

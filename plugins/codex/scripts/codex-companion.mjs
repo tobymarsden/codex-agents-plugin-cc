@@ -19,8 +19,10 @@ import {
     parseStructuredOutput,
     readOutputSchema,
     runAppServerReview,
-    runAppServerTurn
+    runAppServerTurn,
+    steerAppServerTurn
   } from "./lib/codex.mjs";
+import { loadBrokerSession } from "./lib/broker-lifecycle.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
@@ -39,6 +41,7 @@ import {
   buildStatusSnapshot,
   readStoredJob,
   resolveCancelableJob,
+  resolveJobReference,
   resolveResultJob,
   sortJobsNewestFirst
 } from "./lib/job-control.mjs";
@@ -79,7 +82,9 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh|--job <job-id>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "    --write gives Codex full access with no sandbox.",
+      "  node scripts/codex-companion.mjs steer <job-id> [--prompt-file <path>] [--json] [text]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -340,7 +345,9 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
   const activeTask = visibleJobs.find((job) => job.jobClass === "task" && (job.status === "queued" || job.status === "running"));
   if (activeTask) {
-    throw new Error(`Task ${activeTask.id} is still running. Use /codex:status before continuing it.`);
+    throw new Error(
+      `Task ${activeTask.id} is still ${activeTask.status}. Use steer ${activeTask.id} <text> to add input to the running turn.`
+    );
   }
 
   const trackedTask = findLatestResumableTaskJob(visibleJobs);
@@ -464,10 +471,10 @@ async function executeTaskRun(request) {
 
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
-    resumeLast: request.resumeLast
+    resumeLast: Boolean(request.resumeLast || request.resumeThreadId)
   });
 
-  let resumeThreadId = null;
+  let resumeThreadId = request.resumeThreadId ?? null;
   if (request.resumeLast) {
     const latestThread = await resolveLatestTrackedTaskThread(workspaceRoot, {
       excludeJobId: request.jobId
@@ -488,7 +495,7 @@ async function executeTaskRun(request) {
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
     effort: request.effort,
-    sandbox: request.write ? "workspace-write" : "read-only",
+    sandbox: request.write ? "danger-full-access" : "read-only",
     onProgress: request.onProgress,
     persistThread: true,
     threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
@@ -564,7 +571,7 @@ function getJobKindLabel(kind, jobClass) {
   return jobClass === "review" ? "review" : "rescue";
 }
 
-function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summary, write = false }) {
+function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summary, write = false, parentJobId = null }) {
   return createJobRecord({
     id: generateJobId(prefix),
     kind,
@@ -573,7 +580,8 @@ function createCompanionJob({ prefix, kind, title, workspaceRoot, jobClass, summ
     workspaceRoot,
     jobClass,
     summary,
-    write
+    write,
+    ...(parentJobId ? { parentJobId } : {})
   });
 }
 
@@ -589,7 +597,7 @@ function createTrackedProgress(job, options = {}) {
   };
 }
 
-function buildTaskJob(workspaceRoot, taskMetadata, write) {
+function buildTaskJob(workspaceRoot, taskMetadata, write, parentJobId = null) {
   return createCompanionJob({
     prefix: "task",
     kind: "task",
@@ -597,11 +605,12 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
     workspaceRoot,
     jobClass: "task",
     summary: taskMetadata.summary,
-    write
+    write,
+    parentJobId
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, resumeThreadId, jobId }) {
   return {
     cwd,
     model,
@@ -609,6 +618,7 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
     prompt,
     write,
     resumeLast,
+    resumeThreadId,
     jobId
   };
 }
@@ -759,9 +769,20 @@ async function handleReview(argv) {
   });
 }
 
+function resolveTaskResumeJob(cwd, reference) {
+  const { job } = resolveJobReference(cwd, reference);
+  if (isActiveJobStatus(job.status)) {
+    throw new Error(`Job ${job.id} is still ${job.status}. Use steer ${job.id} <text> to add input to the running turn.`);
+  }
+  if (job.jobClass !== "task" || !job.threadId) {
+    throw new Error(`No Codex thread is recorded for job ${job.id}.`);
+  }
+  return job;
+}
+
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "job"],
     booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
     aliasMap: {
       m: "model"
@@ -776,20 +797,26 @@ async function handleTask(argv) {
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
   const fresh = Boolean(options.fresh);
+  if (options.job && (resumeLast || fresh)) {
+    throw new Error("Choose one of --job, --resume, or --fresh.");
+  }
   if (resumeLast && fresh) {
     throw new Error("Choose either --resume/--resume-last or --fresh.");
   }
+
+  const parentJob = options.job ? resolveTaskResumeJob(cwd, options.job) : null;
+  const resumeThreadId = parentJob?.threadId ?? null;
   const write = Boolean(options.write);
   const taskMetadata = buildTaskRunMetadata({
     prompt,
-    resumeLast
+    resumeLast: resumeLast || Boolean(resumeThreadId)
   });
 
   if (options.background) {
     ensureCodexAvailable(cwd);
-    requireTaskRequest(prompt, resumeLast);
+    requireTaskRequest(prompt, resumeLast || Boolean(resumeThreadId));
 
-    const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+    const job = buildTaskJob(workspaceRoot, taskMetadata, write, parentJob?.id ?? null);
     const request = buildTaskRequest({
       cwd,
       model,
@@ -797,6 +824,7 @@ async function handleTask(argv) {
       prompt,
       write,
       resumeLast,
+      resumeThreadId,
       jobId: job.id
     });
     const { payload } = enqueueBackgroundTask(cwd, job, request);
@@ -804,7 +832,7 @@ async function handleTask(argv) {
     return;
   }
 
-  const job = buildTaskJob(workspaceRoot, taskMetadata, write);
+  const job = buildTaskJob(workspaceRoot, taskMetadata, write, parentJob?.id ?? null);
   await runForegroundCommand(
     job,
     (progress) =>
@@ -815,10 +843,54 @@ async function handleTask(argv) {
         prompt,
         write,
         resumeLast,
+        resumeThreadId,
         jobId: job.id,
         onProgress: progress
       }),
     { json: options.json }
+  );
+}
+
+async function handleSteer(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "prompt-file"],
+    booleanOptions: ["json"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals[0] ?? "";
+  if (!reference) {
+    throw new Error("Provide a job id to steer.");
+  }
+
+  const text = readTaskPrompt(cwd, options, positionals.slice(1)).trim();
+  if (!text) {
+    throw new Error("Provide steer text, a prompt file, or piped stdin.");
+  }
+
+  const { workspaceRoot, job } = resolveJobReference(cwd, reference);
+  if (job.status !== "running") {
+    const followUp = isActiveJobStatus(job.status) ? "" : ` Use task --job ${job.id} to continue it.`;
+    throw new Error(`Job ${job.id} is ${job.status}; only a running job can be steered.${followUp}`);
+  }
+
+  const storedJob = readStoredJob(workspaceRoot, job.id) ?? {};
+  const threadId = storedJob.threadId ?? job.threadId ?? null;
+  const turnId = storedJob.turnId ?? job.turnId ?? null;
+  if (!threadId || !turnId) {
+    throw new Error(`Job ${job.id} has not started its Codex turn yet.`);
+  }
+
+  if (!loadBrokerSession(workspaceRoot)) {
+    throw new Error("No shared Codex runtime is active for this workspace, so the running turn cannot be reached.");
+  }
+
+  const steered = await steerAppServerTurn(cwd, { threadId, turnId, text });
+  appendLogLine(job.logFile, `Steered: ${shorten(text)}`);
+  outputCommandResult(
+    { jobId: job.id, threadId, turnId: steered.turnId, text },
+    `Steered job ${job.id} (turn ${steered.turnId}).\n`,
+    options.json
   );
 }
 
@@ -1042,6 +1114,9 @@ async function main() {
       break;
     case "task":
       await handleTask(argv);
+      break;
+    case "steer":
+      await handleSteer(argv);
       break;
     case "transfer":
       await handleTransfer(argv);

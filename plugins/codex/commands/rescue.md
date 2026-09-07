@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to the Codex rescue subagent
-argument-hint: "[--background|--wait] [--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--resume|--fresh|--job <id>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]"
 allowed-tools: Bash(node:*), AskUserQuestion, Agent
 ---
 
@@ -20,6 +20,7 @@ Execution mode:
 - `--model` and `--effort` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
 - If the request includes `--resume`, do not ask whether to continue. The user already chose.
 - If the request includes `--fresh`, do not ask whether to continue. The user already chose.
+- If the request includes `--job <id>`, do not ask whether to continue. The user already named the job to continue.
 - Otherwise, before starting Codex, check for a resumable rescue thread from this Claude session by running:
 
 ```bash
@@ -39,11 +40,14 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task-resume-candidate -
 Operating rules:
 
 - The subagent is a thin forwarder only. It should use one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task ...` and return that command's stdout as-is.
+- If the user is redirecting, steering, or adding instructions to a Codex job that is currently running and names it (a job id, or "the running task" when only one is running), that single call is `steer <job-id> <text>` instead of `task`.
 - Return the Codex companion stdout verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
 - Do not ask the subagent to inspect files, monitor progress, poll `/codex:status`, fetch `/codex:result`, call `/codex:cancel`, summarize output, or do follow-up work of its own.
 - Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort.
 - Leave the model unset unless the user explicitly asks for one. If they ask for `spark`, map it to `gpt-5.3-codex-spark`.
 - Leave `--resume` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.
+- Leave `--job <id>` in the forwarded request too. The subagent maps it to `task --job <id>`.
+- `--write` gives Codex full access with no sandbox. The subagent adds it by default unless the user asks for read-only work.
 - If the helper reports that Codex is missing or unauthenticated, stop and tell the user to run `/codex:setup`.
 - If the user did not supply a request, ask what Codex should investigate or fix.

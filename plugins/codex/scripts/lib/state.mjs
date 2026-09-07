@@ -153,11 +153,10 @@ function acquireStateLock(cwd) {
         continue;
       }
       if (Date.now() >= deadline) {
-        const timeout = new Error(
-          `Timed out after ${LOCK_TIMEOUT_MS}ms waiting for the Codex state lock at ${lockFile}.`
+        throw Object.assign(
+          new Error(`Timed out after ${LOCK_TIMEOUT_MS}ms waiting for the Codex state lock at ${lockFile}.`),
+          { code: "CODEX_STATE_LOCK_TIMEOUT" }
         );
-        timeout.code = "CODEX_STATE_LOCK_TIMEOUT";
-        throw timeout;
       }
       sleepSync(LOCK_RETRY_MS);
     }
