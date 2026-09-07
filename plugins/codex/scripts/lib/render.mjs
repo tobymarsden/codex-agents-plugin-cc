@@ -412,7 +412,11 @@ export function renderJobMetaLine(job) {
 export function renderJobOutput(snapshot, waitTimeoutMs = null) {
   const job = snapshot.job;
   const timing = job.status === "queued" || job.status === "running" ? job.elapsed : job.duration;
-  const lines = [`Job ${job.id}: ${job.status} (${job.phase}${timing ? `, ${timing}` : ""})`];
+  const lines = [];
+  if (snapshot.continuedFrom) {
+    lines.push(`Job ${snapshot.continuedFrom} continued as ${job.id}`);
+  }
+  lines.push(`Job ${job.id}: ${job.status} (${job.phase}${timing ? `, ${timing}` : ""})`);
 
   const metaLine = renderJobMetaLine(job);
   if (metaLine) {
@@ -424,7 +428,13 @@ export function renderJobOutput(snapshot, waitTimeoutMs = null) {
     lines.push(`Thread: ${snapshot.thread.status?.type ?? "unknown"}${acceptsInput}`);
   }
 
-  lines.push(...snapshot.log);
+  if (snapshot.log.length === 0 && snapshot.logTotal > 0 && snapshot.logSince > 0) {
+    lines.push("[no new log lines since the last read]");
+  } else {
+    lines.push(...snapshot.log);
+    // Always report the totals: this line is how a repeat reader learns where to resume.
+    lines.push(`[log lines ${snapshot.logStart}-${snapshot.logTotal} of ${snapshot.logTotal}]`);
+  }
 
   if (snapshot.result != null) {
     lines.push("", String(snapshot.result).trimEnd());

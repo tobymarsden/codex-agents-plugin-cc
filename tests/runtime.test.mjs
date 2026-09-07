@@ -2163,6 +2163,132 @@ test("output renders a finished job as text", () => {
   assert.match(rendered.stdout, /Handled the requested task/);
 });
 
+test("output --since reads the log forward from a line offset", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const finishedJob = runFinishedFixtureTask(repo, env);
+  endFixtureSession(repo, env);
+
+  const readJson = (...args) =>
+    JSON.parse(run("node", [SCRIPT, "output", finishedJob.id, "--tail", "1000", ...args, "--json"], { cwd: repo, env }).stdout);
+  const readText = (...args) => run("node", [SCRIPT, "output", finishedJob.id, "--tail", "1000", ...args], { cwd: repo, env });
+
+  const whole = readJson();
+  assert.ok(whole.logTotal > 2, `expected a multi-line log, got ${whole.logTotal}`);
+  assert.equal(whole.log.length, whole.logTotal);
+  assert.equal(whole.logStart, 1);
+  assert.match(readText().stdout, new RegExp(`\\[log lines 1-${whole.logTotal} of ${whole.logTotal}\\]`));
+
+  const forward = readJson("--since", "2");
+  assert.deepEqual(forward.log, whole.log.slice(2));
+  assert.equal(forward.logStart, 3);
+  assert.equal(forward.logTotal, whole.logTotal);
+  const forwardText = readText("--since", "2").stdout;
+  assert.match(forwardText, new RegExp(`\\[log lines 3-${whole.logTotal} of ${whole.logTotal}\\]`));
+  // The trailer sits with the log it describes; the final answer stays last.
+  assert.ok(forwardText.indexOf("[log lines") < forwardText.lastIndexOf("Handled the requested task"), forwardText);
+
+  const exhausted = readJson("--since", String(whole.logTotal));
+  assert.deepEqual(exhausted.log, []);
+  assert.equal(exhausted.logStart, whole.logTotal + 1);
+  assert.equal(exhausted.logTotal, whole.logTotal);
+  const exhaustedText = readText("--since", String(whole.logTotal + 10)).stdout;
+  assert.match(exhaustedText, /^\[no new log lines since the last read\]$/m);
+  assert.doesNotMatch(exhaustedText, /\[log lines/);
+
+  const waited = run(
+    "node",
+    [SCRIPT, "output", finishedJob.id, "--tail", "1000", "--since", "2", "--wait", "5000", "--json"],
+    { cwd: repo, env }
+  );
+  assert.equal(waited.status, 0, waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).logStart, 3);
+
+  const rejected = run("node", [SCRIPT, "output", finishedJob.id, "--since", "-1"], { cwd: repo, env });
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /--since requires a non-negative number/);
+});
+
+test("output follows a resumed job to its newest turn while status stays on the job it names", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const statePath = path.join(resolveStateDir(repo), "state.json");
+  const readIndex = () => JSON.parse(fs.readFileSync(statePath, "utf8")).jobs;
+
+  const first = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env });
+  assert.equal(first.status, 0, first.stderr);
+  const parentJob = readIndex().find((job) => job.jobClass === "task");
+
+  const resumed = run("node", [SCRIPT, "task", "--job", parentJob.id, "follow up"], { cwd: repo, env });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  const childJob = readIndex().find((job) => job.parentJobId === parentJob.id);
+  endFixtureSession(repo, env);
+
+  const followed = JSON.parse(run("node", [SCRIPT, "output", parentJob.id, "--json"], { cwd: repo, env }).stdout);
+  assert.equal(followed.job.id, childJob.id);
+  assert.equal(followed.continuedFrom, parentJob.id);
+
+  const rendered = run("node", [SCRIPT, "output", parentJob.id], { cwd: repo, env });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.ok(
+    rendered.stdout.startsWith(`Job ${parentJob.id} continued as ${childJob.id}\nJob ${childJob.id}: completed`),
+    rendered.stdout
+  );
+
+  // Reading the child directly is an ordinary read: no chain move, no extra line.
+  const direct = JSON.parse(run("node", [SCRIPT, "output", childJob.id, "--json"], { cwd: repo, env }).stdout);
+  assert.equal(direct.job.id, childJob.id);
+  assert.equal(direct.continuedFrom, undefined);
+  assert.ok(
+    run("node", [SCRIPT, "output", childJob.id], { cwd: repo, env }).stdout.startsWith(`Job ${childJob.id}: completed`)
+  );
+
+  const status = JSON.parse(run("node", [SCRIPT, "status", parentJob.id, "--json"], { cwd: repo, env }).stdout);
+  assert.equal(status.job.id, parentJob.id);
+});
+
+test("output --wait on the original job id waits for the resumed turn to finish", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const statePath = path.join(resolveStateDir(repo), "state.json");
+  const readIndex = () => JSON.parse(fs.readFileSync(statePath, "utf8")).jobs;
+
+  const first = run("node", [SCRIPT, "task", "initial task"], { cwd: repo, env });
+  assert.equal(first.status, 0, first.stderr);
+  const parentJob = readIndex().find((job) => job.jobClass === "task");
+
+  // The fixture holds each turn open for 5s, so a wait that ignored the chain would
+  // return at once against the already finished parent.
+  const resumed = run("node", [SCRIPT, "task", "--background", "--job", parentJob.id, "--json", "follow up"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(resumed.status, 0, resumed.stderr);
+  const childId = JSON.parse(resumed.stdout).jobId;
+
+  const waited = run("node", [SCRIPT, "output", parentJob.id, "--wait", "20000", "--json"], { cwd: repo, env });
+  assert.equal(waited.status, 0, waited.stderr);
+  const snapshot = JSON.parse(waited.stdout);
+  assert.equal(snapshot.waitTimedOut, false);
+  assert.equal(snapshot.job.id, childId);
+  assert.equal(snapshot.job.status, "completed");
+  assert.equal(snapshot.continuedFrom, parentJob.id);
+
+  endFixtureSession(repo, env);
+});
+
 const EXPECTED_TOKEN_USAGE = {
   inputTokens: 1200,
   cachedInputTokens: 300,

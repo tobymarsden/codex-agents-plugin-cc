@@ -11,8 +11,8 @@ user-invocable: false
 The `agents` MCP server is the primary way for a Claude main thread to drive Codex.
 
 - `Agent(prompt, run_in_background?, write?, model?, effort?, resume?, cwd?)`: starts a task; `resume` continues a job's Codex thread.
-- `SendMessage(to, message, summary?, cwd?)`: steers a running job at its next step, or resumes a finished job as a new job on the same thread, linked by `parentJobId`.
-- `TaskOutput(task_id, block?, timeout?, cwd?)`: reads status, live thread state, recent log, model and tokens, and the final result; blocking defaults to true.
+- `SendMessage(to, message, summary?, cwd?)`: steers a running job at its next step, or resumes a finished job as a new job on the same thread, linked by `parentJobId`. Keep using the first job id: both tools follow the resume chain to the newest turn.
+- `TaskOutput(task_id, block?, timeout?, cwd?)`: reads status, live thread state, recent log, model and tokens, and the final result; blocking defaults to true and waits thirty minutes. Repeat reads are incremental, so a second call shows only what happened since the first.
 - `TaskStop(task_id, cwd?)`: cancels a running job.
 - `ListAgents(cwd?)`: lists session jobs with status, phase, elapsed time, input availability, model, and `<n>tok`.
 

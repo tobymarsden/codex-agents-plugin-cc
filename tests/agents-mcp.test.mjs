@@ -215,6 +215,102 @@ test("agents MCP tools drive a Codex job from launch through steer, resume, list
   assert.equal(fs.existsSync(resolveSessionFile(repo)), false);
 });
 
+test("SendMessage keeps one job id across resumes and leaves a linear chain", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const server = startServer(repo, binDir);
+  try {
+    await server.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+
+    const launched = await callTool(server, "Agent", {
+      prompt: "investigate the flaky worker timeout",
+      run_in_background: true
+    });
+    const taskId = launched.text.match(/Started Codex job (task-[a-z0-9-]+)/)[1];
+    await waitFor(() => readJobs(repo).find((job) => job.id === taskId && job.status === "completed"));
+
+    const firstResume = await callTool(server, "SendMessage", { to: taskId, message: "now summarize what changed" });
+    assert.equal(firstResume.isError, false, firstResume.text);
+    assert.match(firstResume.text, new RegExp(`Use TaskOutput ${taskId} to read it`));
+    const childId = firstResume.text.match(/as (task-[a-z0-9-]+)/)[1];
+    await waitFor(() => readJobs(repo).find((job) => job.id === childId && job.status === "completed"));
+
+    // The caller still holds the original id; the second message must land on the newest turn.
+    const secondResume = await callTool(server, "SendMessage", { to: taskId, message: "and once more" });
+    assert.equal(secondResume.isError, false, secondResume.text);
+    assert.match(secondResume.text, new RegExp(`Resumed job ${childId}, the latest turn of ${taskId}`));
+    const grandchildId = secondResume.text.match(/as (task-[a-z0-9-]+)/)[1];
+    await waitFor(() => readJobs(repo).find((job) => job.id === grandchildId && job.status === "completed"));
+
+    const jobs = readJobs(repo);
+    assert.equal(jobs.find((job) => job.id === grandchildId).parentJobId, childId);
+    for (const job of jobs) {
+      const children = jobs.filter((candidate) => candidate.parentJobId === job.id);
+      assert.ok(children.length <= 1, `job ${job.id} has ${children.length} children: the chain forked`);
+    }
+
+    const followed = await callTool(server, "TaskOutput", { task_id: taskId, block: false });
+    assert.equal(followed.isError, false, followed.text);
+    assert.match(followed.text, new RegExp(`^Job ${taskId} continued as ${grandchildId}`));
+  } finally {
+    await server.close();
+  }
+
+  const cleanup = endSession(repo, binDir);
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("TaskOutput reads the log forward on later calls in one server process", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const server = startServer(repo, binDir);
+  try {
+    await server.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+
+    const launched = await callTool(server, "Agent", {
+      prompt: "investigate the flaky worker timeout",
+      run_in_background: true
+    });
+    const taskId = launched.text.match(/Started Codex job (task-[a-z0-9-]+)/)[1];
+    const job = await waitFor(() => {
+      const candidate = readJobs(repo).find((entry) => entry.id === taskId);
+      return candidate?.status === "running" && candidate.turnId ? candidate : null;
+    });
+
+    const appendLines = (label, count) => {
+      const lines = Array.from({ length: count }, (_, index) => `[log] ${label} line ${index}`);
+      fs.appendFileSync(job.logFile, `${lines.join("\n")}\n`);
+    };
+
+    appendLines("batch-one", 60);
+    const first = await callTool(server, "TaskOutput", { task_id: taskId, block: false });
+    assert.equal(first.isError, false, first.text);
+    assert.match(first.text, /batch-one line 59/);
+    const readSoFar = Number(first.text.match(/\[log lines \d+-\d+ of (\d+)\]/)[1]);
+
+    appendLines("batch-two", 3);
+    const second = await callTool(server, "TaskOutput", { task_id: taskId, block: false });
+    assert.equal(second.isError, false, second.text);
+    assert.doesNotMatch(second.text, /batch-one/);
+    assert.match(second.text, /batch-two line 2/);
+    assert.match(second.text, new RegExp(`\\[log lines ${readSoFar + 1}-`));
+
+    const stopped = await callTool(server, "TaskStop", { task_id: taskId });
+    assert.equal(stopped.isError, false, stopped.text);
+  } finally {
+    await server.close();
+  }
+
+  const cleanup = endSession(repo, binDir);
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
 test("agents MCP tools report refusals and unknown jobs as tool errors", async () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

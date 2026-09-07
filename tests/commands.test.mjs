@@ -131,17 +131,22 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution/i);
   assert.match(agent, /Use exactly one `Bash` call/i);
   assert.match(agent, /Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own/i);
-  assert.match(agent, /Do not call `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
+  assert.match(agent, /Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
   assert.match(agent, /Leave `--effort` unset unless the user explicitly requests a specific reasoning effort/i);
   assert.match(agent, /Leave model unset by default/i);
   assert.match(agent, /`spark` maps to the current Codex Spark model/i);
   assert.match(agent, /If the user asks for a concrete model slug such as `gpt-5\.5`, pass it through with `--model`/i);
   assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
   assert.match(agent, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
-  assert.match(agent, /codex-prompting/);
   assert.doesNotMatch(agent, /gpt-5-4-prompting|gpt-5\.3-codex-spark/);
-  assert.match(agent, /only to tighten the user's request into a better Codex prompt/i);
-  assert.match(agent, /Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work/i);
+  // The wrapper makes one Bash call, so it attaches no skills and carries the forwarding
+  // rules the runtime skill used to supply itself.
+  assert.doesNotMatch(agent, /^skills:/m);
+  assert.doesNotMatch(agent, /codex-prompting|codex-cli-runtime/);
+  assert.match(agent, /Forward the user's task text as-is/i);
+  assert.match(agent, /accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`/i);
+  assert.match(agent, /Treat `--background`, `--wait`, `--resume`, `--fresh`, and `--job <id>` as routing controls/i);
+  assert.match(agent, /Default to a write-capable Codex run by adding `--write`/i);
   assert.match(runtimeSkill, /## The agents MCP tools/);
   assert.match(runtimeSkill, /## Rules for the rescue wrapper/);
   assert.match(runtimeSkill, /Make exactly one Bash call to `task`, or to `steer` for a running job/i);

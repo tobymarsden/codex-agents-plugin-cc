@@ -17,8 +17,12 @@ const COMPANION_SCRIPT = path.join(PLUGIN_ROOT, "scripts", "codex-companion.mjs"
 const PLUGIN_MANIFEST = path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json");
 const SERVER_NAME = "codex-agents";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
-const DEFAULT_OUTPUT_TIMEOUT_MS = 240000;
+const DEFAULT_OUTPUT_TIMEOUT_MS = 1800000;
 const SUMMARY_LIMIT = 60;
+const LOG_TRAILER = /\[log lines \d+-\d+ of (\d+)\]/;
+
+// Job id -> log lines already handed to this session, so each TaskOutput reads forward.
+const logCursors = new Map();
 
 function pluginVersion() {
   return JSON.parse(fs.readFileSync(PLUGIN_MANIFEST, "utf8")).version;
@@ -159,19 +163,25 @@ const TOOLS = [
       const to = requireString(args, "to");
       const message = requireString(args, "message");
       const workspace = cwdFlags(args);
+      // `output` follows the resume chain, so a job id keeps reaching its newest turn.
       const { job } = await cliJson(["output", to, ...workspace, "--json", "--tail", "0"]);
+      const target = job.id;
+      const via = target === to ? "" : `, the latest turn of ${to}`;
 
       if (job.status === "running") {
-        const steered = await cliJson(["steer", to, ...workspace, "--json", message]);
-        return `Steered job ${to} (turn ${steered.turnId}).`;
+        const steered = await cliJson(["steer", target, ...workspace, "--json", message]);
+        return `Steered job ${target}${via} (turn ${steered.turnId}).`;
       }
 
       if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
-        const resumed = await cliJson(["task", "--background", "--job", to, ...workspace, "--json", message]);
-        return `Resumed job ${to} as ${resumed.jobId} (same Codex thread). Use TaskOutput ${resumed.jobId} to read it.`;
+        const resumed = await cliJson(["task", "--background", "--job", target, ...workspace, "--json", message]);
+        return (
+          `Resumed job ${target}${via} as ${resumed.jobId} (same Codex thread). ` +
+          `Use TaskOutput ${to} to read it.`
+        );
       }
 
-      throw new Error(`Job ${to} has not started its Codex turn yet; try again in a moment.`);
+      throw new Error(`Job ${target} has not started its Codex turn yet; try again in a moment.`);
     }
   },
   {
@@ -183,7 +193,7 @@ const TOOLS = [
       properties: {
         task_id: { type: "string", description: "Job id to read." },
         block: { type: "boolean", description: "Wait for the job to finish; defaults to true." },
-        timeout: { type: "number", description: "Milliseconds to wait when blocking; defaults to 240000." },
+        timeout: { type: "number", description: "Milliseconds to wait when blocking; defaults to 1800000." },
         cwd: CWD_SCHEMA
       },
       required: ["task_id"]
@@ -191,11 +201,18 @@ const TOOLS = [
     async run(args) {
       const taskId = requireString(args, "task_id");
       const workspace = cwdFlags(args);
-      if (args.block === false) {
-        return cliText(["output", taskId, ...workspace]);
+      const cursor = logCursors.get(taskId);
+      const command = ["output", taskId, ...workspace, ...(cursor === undefined ? [] : ["--since", String(cursor)])];
+      if (args.block !== false) {
+        command.push("--wait", String(args.timeout ?? DEFAULT_OUTPUT_TIMEOUT_MS));
       }
-      const timeout = args.timeout ?? DEFAULT_OUTPUT_TIMEOUT_MS;
-      return cliText(["output", taskId, ...workspace, "--wait", String(timeout)]);
+
+      const text = await cliText(command);
+      const trailer = LOG_TRAILER.exec(text);
+      if (trailer) {
+        logCursors.set(taskId, Number(trailer[1]));
+      }
+      return text;
     }
   },
   {

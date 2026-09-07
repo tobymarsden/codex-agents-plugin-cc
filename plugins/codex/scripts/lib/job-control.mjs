@@ -212,6 +212,26 @@ function matchJobReference(jobs, reference, predicate = () => true) {
   throw new Error(`No job found for "${reference}". Run /codex:status to list known jobs.`);
 }
 
+/**
+ * Follows a job forward through the resume chain (`parentJobId`) and returns the newest
+ * job in it, so one job id keeps reading the latest turn of the same Codex thread.
+ */
+export function resolveLatestInChain(jobs, jobId) {
+  const visited = new Set([jobId]);
+  let latest = jobs.find((job) => job.id === jobId) ?? null;
+  let currentId = jobId;
+
+  for (;;) {
+    const children = sortJobsNewestFirst(jobs.filter((job) => job.parentJobId === currentId && !visited.has(job.id)));
+    if (children.length === 0) {
+      return latest;
+    }
+    latest = children[0];
+    currentId = latest.id;
+    visited.add(currentId);
+  }
+}
+
 export function resolveJobReference(cwd, reference) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
@@ -267,9 +287,10 @@ function isFinalJobStatus(status) {
 
 const FINAL_OUTPUT_LOG_LINE = /^\[[^\]]+\] Final output$/;
 
-function readJobLogTail(logFile, maxLines) {
+/** Returns `{ lines, logStart, logTotal }`: the tail of the log after skipping `since` lines. */
+function readJobLogTail(logFile, maxLines, since = 0) {
   if (!logFile || !fs.existsSync(logFile)) {
-    return [];
+    return { lines: [], logStart: 1, logTotal: 0, logSince: since };
   }
 
   const lines = fs.readFileSync(logFile, "utf8").split(/\r?\n/);
@@ -284,7 +305,10 @@ function readJobLogTail(logFile, maxLines) {
   while (lines.length > 0 && lines[lines.length - 1] === "") {
     lines.pop();
   }
-  return lines.slice(-maxLines);
+
+  const logTotal = lines.length;
+  const shown = lines.slice(since).slice(-maxLines);
+  return { lines: shown, logStart: logTotal - shown.length + 1, logTotal, logSince: since };
 }
 
 function readJobResultText(storedJob) {
@@ -305,16 +329,30 @@ export async function buildOutputSnapshot(cwd, reference, options = {}) {
     throw new Error(`No job found for "${reference}". Run /codex:status to inspect known jobs.`);
   }
 
-  const job = enrichJob(selected);
+  const latest = resolveLatestInChain(jobs, selected.id);
+  const continuedFrom = latest.id === selected.id ? null : selected.id;
+  const job = enrichJob(latest);
   const storedJob = readStoredJob(workspaceRoot, job.id);
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const runtimeThread =
     threadId && loadBrokerSession(workspaceRoot) ? await readAppServerThread(workspaceRoot, threadId) : null;
 
+  // A reader cursor belongs to the log it was measured against, so it does not carry
+  // across a resume: the descendant's log is a different, shorter file.
+  const log = readJobLogTail(
+    job.logFile,
+    options.tail ?? DEFAULT_OUTPUT_TAIL_LINES,
+    continuedFrom ? 0 : (options.since ?? 0)
+  );
+
   return {
     workspaceRoot,
     job,
-    log: readJobLogTail(job.logFile, options.tail ?? DEFAULT_OUTPUT_TAIL_LINES),
+    ...(continuedFrom ? { continuedFrom } : {}),
+    log: log.lines,
+    logStart: log.logStart,
+    logTotal: log.logTotal,
+    logSince: log.logSince,
     result: isFinalJobStatus(job.status) ? readJobResultText(storedJob) : null,
     thread: runtimeThread
       ? {

@@ -44,6 +44,7 @@ import {
   readStoredJob,
   resolveCancelableJob,
   resolveJobReference,
+  resolveLatestInChain,
   resolveResultJob,
   sortJobsNewestFirst
 } from "./lib/job-control.mjs";
@@ -92,7 +93,7 @@ function printUsage() {
       "    --write gives Codex full access with no sandbox.",
       "  node scripts/codex-companion.mjs steer <job-id> [--prompt-file <path>] [--json] [text]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
-      "  node scripts/codex-companion.mjs output <job-id> [--wait <ms>] [--tail <n>] [--json]",
+      "  node scripts/codex-companion.mjs output <job-id> [--wait <ms>] [--tail <n>] [--since <n>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -1046,7 +1047,7 @@ function parseNumericOption(value, flag) {
 
 async function handleOutput(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "wait", "tail"],
+    valueOptions: ["cwd", "wait", "tail", "since"],
     booleanOptions: ["json"]
   });
 
@@ -1057,13 +1058,17 @@ async function handleOutput(argv) {
   }
 
   const tail = parseNumericOption(options.tail, "--tail");
+  const since = parseNumericOption(options.since, "--since");
   const waitTimeoutMs = parseNumericOption(options.wait, "--wait");
 
   if (waitTimeoutMs !== null) {
-    await waitForJobCompletion(cwd, reference, waitTimeoutMs);
+    // Wait on the job `output` will report: the newest job in the reference's resume chain.
+    const { workspaceRoot, job } = resolveJobReference(cwd, reference);
+    const latest = resolveLatestInChain(sortJobsNewestFirst(listJobs(workspaceRoot)), job.id) ?? job;
+    await waitForJobCompletion(cwd, latest.id, waitTimeoutMs);
   }
 
-  const snapshot = await buildOutputSnapshot(cwd, reference, { tail });
+  const snapshot = await buildOutputSnapshot(cwd, reference, { tail, since });
   const payload =
     waitTimeoutMs === null
       ? snapshot

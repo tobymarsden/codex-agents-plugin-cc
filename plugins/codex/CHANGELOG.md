@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.0
+
+- `TaskOutput`'s blocking wait defaults to thirty minutes instead of four, so one call usually covers a job instead of a poll loop
+- Repeat `TaskOutput` reads are incremental: each call in a session resumes where the last stopped, and `output` gains `--since <n>` with a `[log lines a-b of N]` trailer
+- One job id addresses a whole conversation: `output` and `SendMessage` follow the `parentJobId` resume chain to the newest turn, and `output` reports `continued as` when it moved
+- The rescue wrapper no longer attaches the two skills; it forwards the user's text as-is and carries its own rules
+
 ## 1.2.0
 
 - Every job records model and per-turn token usage, shown by `output`, `result`, `status --json`, `TaskOutput`, and `ListAgents`
