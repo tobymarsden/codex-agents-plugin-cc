@@ -1,11 +1,18 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { makeTempDir } from "./helpers.mjs";
-import { resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
+import { listJobs, resolveJobFile, resolveJobLogFile, resolveStateDir, resolveStateFile, saveState } from "../plugins/codex/scripts/lib/state.mjs";
+
+const STATE_MODULE_URL = pathToFileURL(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "../plugins/codex/scripts/lib/state.mjs")
+).href;
 
 test("resolveStateDir uses a temp-backed per-workspace directory", () => {
   const workspace = makeTempDir();
@@ -102,4 +109,43 @@ test("saveState prunes dropped job artifacts when indexed jobs exceed the cap", 
       .flatMap((jobId) => [`${jobId}.json`, `${jobId}.log`])
       .sort()
   );
+});
+
+test("upsertJob keeps every entry when concurrent processes write the same state file", async () => {
+  const workspace = makeTempDir();
+  const writerCount = 4;
+  const jobsPerWriter = 8;
+  const script = `
+    const { upsertJob } = await import(${JSON.stringify(STATE_MODULE_URL)});
+    const { CODEX_TEST_WORKSPACE, CODEX_TEST_WRITER, CODEX_TEST_JOBS } = process.env;
+    for (let index = 1; index <= Number(CODEX_TEST_JOBS); index += 1) {
+      upsertJob(CODEX_TEST_WORKSPACE, { id: \`p\${CODEX_TEST_WRITER}-\${index}\`, status: "running" });
+    }
+  `;
+
+  const exitCodes = await Promise.all(
+    Array.from({ length: writerCount }, (_, writer) => {
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+        stdio: ["ignore", "ignore", "inherit"],
+        env: {
+          ...process.env,
+          CODEX_TEST_WORKSPACE: workspace,
+          CODEX_TEST_WRITER: String(writer + 1),
+          CODEX_TEST_JOBS: String(jobsPerWriter)
+        }
+      });
+      return new Promise((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code) => resolve(code));
+      });
+    })
+  );
+
+  assert.deepEqual(exitCodes, Array.from({ length: writerCount }, () => 0));
+
+  const expectedIds = Array.from({ length: writerCount }, (_, writer) =>
+    Array.from({ length: jobsPerWriter }, (_, index) => `p${writer + 1}-${index + 1}`)
+  ).flat();
+
+  assert.deepEqual(listJobs(workspace).map((job) => job.id).sort(), expectedIds.sort());
 });

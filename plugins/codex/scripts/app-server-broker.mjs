@@ -6,21 +6,10 @@ import path from "node:path";
 import process from "node:process";
 
 import { parseArgs } from "./lib/args.mjs";
-import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./lib/app-server.mjs";
+import { CodexAppServerClient } from "./lib/app-server.mjs";
 import { parseBrokerEndpoint } from "./lib/broker-endpoint.mjs";
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
-
-function buildStreamThreadIds(method, params, result) {
-  const threadIds = new Set();
-  if (params?.threadId) {
-    threadIds.add(params.threadId);
-  }
-  if (method === "review/start" && result?.reviewThreadId) {
-    threadIds.add(result.reviewThreadId);
-  }
-  return threadIds;
-}
 
 function buildJsonRpcError(code, message, data) {
   return data === undefined ? { code, message } : { code, message, data };
@@ -33,8 +22,24 @@ function send(socket, message) {
   socket.write(`${JSON.stringify(message)}\n`);
 }
 
-function isInterruptRequest(message) {
-  return message?.method === "turn/interrupt";
+function addOwner(owners, threadId, socket) {
+  if (typeof threadId !== "string") {
+    return;
+  }
+  const sockets = owners.get(threadId) ?? new Set();
+  sockets.add(socket);
+  owners.set(threadId, sockets);
+}
+
+function removeOwner(owners, threadId, socket) {
+  const sockets = owners.get(threadId);
+  if (!sockets) {
+    return;
+  }
+  sockets.delete(socket);
+  if (sockets.size === 0) {
+    owners.delete(threadId);
+  }
 }
 
 function writePidFile(pidFile) {
@@ -66,36 +71,61 @@ async function main() {
   writePidFile(pidFile);
 
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
-  let activeRequestSocket = null;
-  let activeStreamSocket = null;
-  let activeStreamThreadIds = null;
   const sockets = new Set();
+  const subscribers = new Map();
+  const starters = new Map();
+  const threadQueues = new Map();
 
-  function clearSocketOwnership(socket) {
-    if (activeRequestSocket === socket) {
-      activeRequestSocket = null;
-    }
-    if (activeStreamSocket === socket) {
-      activeStreamSocket = null;
-      activeStreamThreadIds = null;
+  function releaseSocket(socket) {
+    sockets.delete(socket);
+    for (const owners of [subscribers, starters]) {
+      for (const threadId of owners.keys()) {
+        removeOwner(owners, threadId, socket);
+      }
     }
   }
 
   function routeNotification(message) {
-    const target = activeRequestSocket ?? activeStreamSocket;
-    if (!target) {
+    const threadId = message.params?.threadId ?? null;
+    const owners = new Set([...(subscribers.get(threadId) ?? []), ...(starters.get(threadId) ?? [])]);
+    for (const socket of owners.size > 0 ? owners : sockets) {
+      send(socket, message);
+    }
+    if (threadId && message.method === "turn/completed") {
+      starters.delete(threadId);
+    }
+  }
+
+  function serializeByThread(threadId, task) {
+    if (typeof threadId !== "string") {
+      task();
       return;
     }
-    send(target, message);
-    if (message.method === "turn/completed" && activeStreamSocket === target) {
-      const threadId = message.params?.threadId ?? null;
-      if (!threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
-        activeStreamSocket = null;
-        activeStreamThreadIds = null;
-        if (activeRequestSocket === target) {
-          activeRequestSocket = null;
-        }
+    const tail = (threadQueues.get(threadId) ?? Promise.resolve()).then(task);
+    threadQueues.set(threadId, tail);
+    tail.then(() => {
+      if (threadQueues.get(threadId) === tail) {
+        threadQueues.delete(threadId);
       }
+    });
+  }
+
+  async function forwardRequest(socket, message) {
+    const params = message.params ?? {};
+    if (STREAMING_METHODS.has(message.method)) {
+      addOwner(starters, params.threadId, socket);
+    }
+    try {
+      const result = await appClient.request(message.method, params);
+      if (message.method === "review/start") {
+        addOwner(starters, result?.reviewThreadId, socket);
+      }
+      send(socket, { id: message.id, result });
+    } catch (error) {
+      send(socket, {
+        id: message.id,
+        error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
+      });
     }
   }
 
@@ -167,69 +197,23 @@ async function main() {
           continue;
         }
 
-        const allowInterruptDuringActiveStream =
-          isInterruptRequest(message) && activeStreamSocket && activeStreamSocket !== socket && !activeRequestSocket;
-
-        if (
-          ((activeRequestSocket && activeRequestSocket !== socket) || (activeStreamSocket && activeStreamSocket !== socket)) &&
-          !allowInterruptDuringActiveStream
-        ) {
-          send(socket, {
-            id: message.id,
-            error: buildJsonRpcError(BROKER_BUSY_RPC_CODE, "Shared Codex broker is busy.")
-          });
+        if (message.method === "broker/subscribe" || message.method === "broker/unsubscribe") {
+          const update = message.method === "broker/subscribe" ? addOwner : removeOwner;
+          update(subscribers, message.params?.threadId, socket);
+          send(socket, { id: message.id, result: {} });
           continue;
         }
 
-        if (allowInterruptDuringActiveStream) {
-          try {
-            const result = await appClient.request(message.method, message.params ?? {});
-            send(socket, { id: message.id, result });
-          } catch (error) {
-            send(socket, {
-              id: message.id,
-              error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
-            });
-          }
-          continue;
-        }
-
-        const isStreaming = STREAMING_METHODS.has(message.method);
-        activeRequestSocket = socket;
-
-        try {
-          const result = await appClient.request(message.method, message.params ?? {});
-          send(socket, { id: message.id, result });
-          if (isStreaming) {
-            activeStreamSocket = socket;
-            activeStreamThreadIds = buildStreamThreadIds(message.method, message.params ?? {}, result);
-          }
-          if (activeRequestSocket === socket) {
-            activeRequestSocket = null;
-          }
-        } catch (error) {
-          send(socket, {
-            id: message.id,
-            error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
-          });
-          if (activeRequestSocket === socket) {
-            activeRequestSocket = null;
-          }
-          if (activeStreamSocket === socket && !isStreaming) {
-            activeStreamSocket = null;
-          }
-        }
+        serializeByThread(message.params?.threadId, () => forwardRequest(socket, message));
       }
     });
 
     socket.on("close", () => {
-      sockets.delete(socket);
-      clearSocketOwnership(socket);
+      releaseSocket(socket);
     });
 
     socket.on("error", () => {
-      sockets.delete(socket);
-      clearSocketOwnership(socket);
+      releaseSocket(socket);
     });
   });
 

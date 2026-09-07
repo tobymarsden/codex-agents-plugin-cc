@@ -19,7 +19,7 @@ const readline = require("node:readline");
 
 	function loadState() {
 	  if (!fs.existsSync(STATE_PATH)) {
-	    return { nextThreadId: 1, nextTurnId: 1, appServerStarts: 0, threads: [], capabilities: null, lastInterrupt: null };
+	    return { nextThreadId: 1, nextTurnId: 1, appServerStarts: 0, threads: [], capabilities: null, lastInterrupt: null, lastSteer: null };
 	  }
 	  return JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
 	}
@@ -143,6 +143,25 @@ function nextTurnId(state) {
   const turnId = "turn_" + state.nextTurnId++;
   saveState(state);
   return turnId;
+}
+
+function activeTurn(threadId) {
+  for (const entry of interruptibleTurns.values()) {
+    if (entry.threadId === threadId) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+function recordSteer(state, entry, text) {
+  entry.steerText = text;
+  state.lastSteer = { threadId: entry.threadId, turnId: entry.turnId, text };
+  saveState(state);
+}
+
+function inputText(input) {
+  return (input || []).filter((item) => item.type === "text").map((item) => item.text).join("\\n");
 }
 
 function importLedgerPath() {
@@ -438,10 +457,13 @@ rl.on("line", (line) => {
 
 	      case "turn/start": {
 	        const thread = ensureThread(state, message.params.threadId);
-	        const prompt = (message.params.input || [])
-          .filter((item) => item.type === "text")
-          .map((item) => item.text)
-          .join("\\n");
+	        const prompt = inputText(message.params.input);
+        const inFlight = activeTurn(thread.id);
+        if (inFlight) {
+          recordSteer(state, inFlight, prompt);
+          send({ id: message.id, result: { turn: buildTurn(inFlight.turnId) } });
+          break;
+        }
         const turnId = nextTurnId(state);
         thread.updatedAt = now();
 	        state.lastTurnStart = {
@@ -587,24 +609,46 @@ rl.on("line", (line) => {
 
 	        if (BEHAVIOR === "interruptible-slow-task") {
 	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
-	          const timer = setTimeout(() => {
+	          const pending = { turnId, threadId: thread.id, steerText: null, timer: null };
+	          pending.timer = setTimeout(() => {
 	            if (!interruptibleTurns.has(turnId)) {
 	              return;
 	            }
 	            interruptibleTurns.delete(turnId);
-	            for (const entry of items) {
+	            const finalItems = pending.steerText === null
+	              ? items
+	              : [{ completed: { type: "agentMessage", id: "msg_" + turnId, text: "Steered: " + pending.steerText, phase: "final_answer" } }];
+	            for (const entry of finalItems) {
 	              if (entry && entry.completed) {
 	                send({ method: "item/completed", params: { threadId: thread.id, turnId, item: entry.completed } });
 	              }
 	            }
 	            send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
 	          }, 5000);
-	          interruptibleTurns.set(turnId, { threadId: thread.id, timer });
+	          interruptibleTurns.set(turnId, pending);
 	        } else if (BEHAVIOR === "slow-task") {
 	          emitTurnCompletedLater(thread.id, turnId, items, 400);
 	        } else {
 	          emitTurnCompleted(thread.id, turnId, items);
 	        }
+	        break;
+	      }
+
+	      case "turn/steer": {
+	        const thread = ensureThread(state, message.params.threadId);
+	        const inFlight = activeTurn(thread.id);
+	        if (!inFlight || inFlight.turnId !== message.params.expectedTurnId) {
+	          throw new Error("expectedTurnId " + message.params.expectedTurnId + " is not the active turn");
+	        }
+	        recordSteer(state, inFlight, inputText(message.params.input));
+	        send({ id: message.id, result: { turnId: inFlight.turnId } });
+	        break;
+	      }
+
+	      case "thread/read": {
+	        const thread = ensureThread(state, message.params.threadId);
+	        const status = activeTurn(thread.id) ? { type: "active", activeFlags: [] } : { type: "idle" };
+	        send({ id: message.id, result: { thread: { ...buildThread(thread), status, canAcceptDirectInput: true } } });
 	        break;
 	      }
 

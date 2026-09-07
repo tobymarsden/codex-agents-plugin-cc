@@ -40,7 +40,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { readJsonFile } from "./fs.mjs";
-import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
+import { BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
 
@@ -619,9 +619,7 @@ async function withAppServer(cwd, fn) {
     return result;
   } catch (error) {
     const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
-    const shouldRetryDirect =
-      (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
-      (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
+    const shouldRetryDirect = brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED");
 
     if (client) {
       await client.close().catch(() => {});

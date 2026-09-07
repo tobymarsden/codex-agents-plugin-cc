@@ -9,8 +9,12 @@ const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
+const LOCK_FILE_NAME = "state.lock";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+const LOCK_TIMEOUT_MS = 5000;
+const LOCK_STALE_MS = 10000;
+const LOCK_RETRY_MS = 15;
 
 function nowIso() {
   return new Date().toISOString();
@@ -111,14 +115,64 @@ export function saveState(cwd, state) {
     removeFileIfExists(job.logFile);
   }
 
-  fs.writeFileSync(resolveStateFile(cwd), `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  const stateFile = resolveStateFile(cwd);
+  const tempFile = `${stateFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tempFile, `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+  fs.renameSync(tempFile, stateFile);
   return nextState;
 }
 
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function lockAgeMs(lockFile) {
+  try {
+    return Date.now() - fs.statSync(lockFile).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+function acquireStateLock(cwd) {
+  ensureStateDir(cwd);
+  const lockFile = path.join(resolveStateDir(cwd), LOCK_FILE_NAME);
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
+  for (;;) {
+    try {
+      fs.closeSync(fs.openSync(lockFile, "wx"));
+      return lockFile;
+    } catch (error) {
+      if (error.code !== "EEXIST") {
+        throw error;
+      }
+      const age = lockAgeMs(lockFile);
+      if (age != null && age > LOCK_STALE_MS) {
+        removeFileIfExists(lockFile);
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        const timeout = new Error(
+          `Timed out after ${LOCK_TIMEOUT_MS}ms waiting for the Codex state lock at ${lockFile}.`
+        );
+        timeout.code = "CODEX_STATE_LOCK_TIMEOUT";
+        throw timeout;
+      }
+      sleepSync(LOCK_RETRY_MS);
+    }
+  }
+}
+
 export function updateState(cwd, mutate) {
-  const state = loadState(cwd);
-  mutate(state);
-  return saveState(cwd, state);
+  const lockFile = acquireStateLock(cwd);
+  try {
+    const state = loadState(cwd);
+    mutate(state);
+    return saveState(cwd, state);
+  } finally {
+    removeFileIfExists(lockFile);
+  }
 }
 
 export function generateJobId(prefix = "job") {

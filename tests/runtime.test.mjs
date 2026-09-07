@@ -2161,6 +2161,60 @@ test("commands lazily start and reuse one shared app-server after first use", as
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
+test("concurrent background tasks share one app-server process", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+
+  installFakeCodex(binDir, "slow-task");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+  const env = buildEnv(binDir);
+
+  const review = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(review.status, 0, review.stderr);
+
+  if (!loadBrokerSession(repo)) {
+    return;
+  }
+
+  const launches = [
+    run("node", [SCRIPT, "task", "--background", "--json", "investigate the first failure"], { cwd: repo, env }),
+    run("node", [SCRIPT, "task", "--background", "--json", "investigate the second failure"], { cwd: repo, env })
+  ];
+
+  for (const launched of launches) {
+    assert.equal(launched.status, 0, launched.stderr);
+    const jobId = JSON.parse(launched.stdout).jobId;
+    const waited = run("node", [SCRIPT, "status", jobId, "--wait", "--timeout-ms", "15000", "--json"], {
+      cwd: repo,
+      env
+    });
+    assert.equal(waited.status, 0, waited.stderr);
+    assert.equal(JSON.parse(waited.stdout).job.status, "completed");
+  }
+
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.equal(fakeState.appServerStarts, 1);
+
+  const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env,
+    input: JSON.stringify({
+      hook_event_name: "SessionEnd",
+      cwd: repo
+    })
+  });
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
 test("setup reuses an existing shared app-server without starting another one", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

@@ -15,6 +15,8 @@ import type {
   ThreadItem,
   ThreadListParams,
   ThreadListResponse,
+  ThreadReadParams,
+  ThreadReadResponse,
   ThreadResumeParams as RawThreadResumeParams,
   ThreadResumeResponse,
   ThreadSetNameParams,
@@ -26,6 +28,8 @@ import type {
   TurnInterruptResponse,
   TurnStartParams,
   TurnStartResponse,
+  TurnSteerParams,
+  TurnSteerResponse,
   UserInput
 } from "../../.generated/app-server-types/v2/index.js";
 
@@ -63,9 +67,13 @@ export interface AppServerMethodMap {
   "thread/resume": { params: ThreadResumeParams; result: ThreadResumeResponse };
   "thread/name/set": { params: ThreadSetNameParams; result: ThreadSetNameResponse };
   "thread/list": { params: ThreadListParams; result: ThreadListResponse };
+  "thread/read": { params: ThreadReadParams; result: ThreadReadResponse };
   "review/start": { params: ReviewStartParams; result: ReviewStartResponse };
   "turn/start": { params: TurnStartParams; result: TurnStartResponse };
   "turn/interrupt": { params: TurnInterruptParams; result: TurnInterruptResponse };
+  "turn/steer": { params: TurnSteerParams; result: TurnSteerResponse };
+  "broker/subscribe": { params: { threadId: string }; result: Record<string, never> };
+  "broker/unsubscribe": { params: { threadId: string }; result: Record<string, never> };
 }
 
 export type AppServerMethod = keyof AppServerMethodMap;
