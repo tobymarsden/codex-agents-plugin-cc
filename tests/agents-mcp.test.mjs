@@ -13,11 +13,13 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
 const MCP_SERVER = path.join(PLUGIN_ROOT, "scripts", "agents-mcp-server.mjs");
 const SESSION_HOOK = path.join(PLUGIN_ROOT, "scripts", "session-lifecycle-hook.mjs");
+const MONITOR_SCRIPT = path.join(PLUGIN_ROOT, "scripts", "job-completion-monitor.mjs");
 
-function startServer(repo, binDir) {
+function startServer(repo, binDir, envOverrides = {}) {
   const env = buildEnv(binDir);
   delete env.CLAUDE_PLUGIN_DATA;
   delete env.CODEX_COMPANION_SESSION_ID;
+  Object.assign(env, envOverrides);
 
   const child = spawn(process.execPath, [MCP_SERVER], { cwd: repo, env, stdio: ["pipe", "pipe", "pipe"] });
   const pending = new Map();
@@ -154,6 +156,10 @@ test("agents MCP tools drive a Codex job from launch through steer, resume, list
     const startedMatch = launched.text.match(/Started Codex job (task-[a-z0-9-]+)/);
     assert.ok(startedMatch, launched.text);
     const taskId = startedMatch[1];
+    // No cwd was passed, so the Monitor command names only the job. This server has no
+    // CLAUDE_PLUGIN_DATA, so the command carries no assignment either.
+    assert.match(launched.text, new RegExp(`command: node "${MONITOR_SCRIPT}" --job ${taskId}\\n`));
+    assert.doesNotMatch(launched.text, /CLAUDE_PLUGIN_DATA/);
 
     // The MCP server has no session env of its own; it reads session.json written by SessionStart.
     assert.equal(readJobs(repo).find((job) => job.id === taskId).sessionId, "session-mcp-test");
@@ -385,7 +391,7 @@ test("agents MCP tools report refusals and unknown jobs as tool errors", async (
   }
 });
 
-test("the Agent tool runs a job in the cwd it is given and prints the wake-up command", async () => {
+test("the Agent tool runs a job in the cwd it is given and prints the Monitor recipe", async () => {
   const repo = makeTempDir();
   const otherRepo = makeTempDir();
   const binDir = makeTempDir();
@@ -404,7 +410,18 @@ test("the Agent tool runs a job in the cwd it is given and prints the wake-up co
     });
     assert.equal(launched.isError, false, launched.text);
     const taskId = launched.text.match(/Started Codex job (task-[a-z0-9-]+)/)[1];
-    assert.match(launched.text, new RegExp(`--wait 3600000 --cwd ${otherRepo}$`));
+    // The Monitor tool is the notification path that works in every client, so it is named
+    // first and the command it needs is spelled out, cwd included.
+    assert.ok(
+      launched.text.indexOf("Monitor tool") < launched.text.indexOf("background Bash call"),
+      launched.text
+    );
+    assert.match(
+      launched.text,
+      new RegExp(
+        `command: node "${MONITOR_SCRIPT}" --job ${taskId} --cwd "${otherRepo}"\\n  description: Codex job ${taskId}`
+      )
+    );
 
     // The job belongs to the other workspace's state dir, not the server's own.
     assert.ok(readJobs(otherRepo).some((job) => job.id === taskId));
@@ -426,7 +443,8 @@ test("the Agent tool runs a job in the cwd it is given and prints the wake-up co
 
     const listed = await callTool(server, "ListAgents", { cwd: otherRepo });
     assert.equal(listed.isError, false, listed.text);
-    assert.match(listed.text, /gpt-test/);
+    // Neither model nor effort was named, so the job ran on the plugin's default model.
+    assert.match(listed.text, /gpt-6-astra/);
     assert.match(listed.text, /1280tok/);
     assert.match(listed.text, /282\.5ktok/);
 
@@ -463,4 +481,45 @@ test("the Agent tool runs a foreground Codex task and returns its result", async
 
   const cleanup = endSession(repo, binDir);
   assert.equal(cleanup.status, 0, cleanup.stderr);
+});
+
+test("the Monitor command pins the state directory the server itself writes to", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const stateDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  // The state directory is derived from CLAUDE_PLUGIN_DATA. A watch that inherits a
+  // different value reads a different directory and never fires, silently, so the printed
+  // command carries this server's value rather than trusting the shell it lands in.
+  const server = startServer(repo, binDir, { CLAUDE_PLUGIN_DATA: stateDir });
+  try {
+    await server.request("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+
+    const launched = await callTool(server, "Agent", {
+      prompt: "investigate the flaky worker timeout",
+      run_in_background: true
+    });
+    assert.equal(launched.isError, false, launched.text);
+    const taskId = launched.text.match(/Started Codex job (task-[a-z0-9-]+)/)[1];
+    assert.match(
+      launched.text,
+      new RegExp(`command: CLAUDE_PLUGIN_DATA="${stateDir}" node "${MONITOR_SCRIPT}" --job ${taskId}\\n`)
+    );
+
+    // And the pinned directory is the one the job actually landed in.
+    process.env.CLAUDE_PLUGIN_DATA = stateDir;
+    let resolved;
+    try {
+      resolved = resolveStateDir(repo);
+    } finally {
+      delete process.env.CLAUDE_PLUGIN_DATA;
+    }
+    assert.equal(resolved.startsWith(stateDir), true, resolved);
+    const jobs = JSON.parse(fs.readFileSync(path.join(resolved, "state.json"), "utf8")).jobs;
+    assert.ok(jobs.some((job) => job.id === taskId));
+  } finally {
+    await server.close();
+  }
 });

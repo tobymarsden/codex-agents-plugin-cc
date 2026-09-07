@@ -46,6 +46,7 @@ import { readJsonFile } from "./fs.mjs";
 import { BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
+import { commandOutputLines } from "./render.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
 const TASK_THREAD_PREFIX = "Codex Companion Task";
@@ -323,6 +324,18 @@ function capEventStrings(value, cap) {
   return value;
 }
 
+/**
+ * Command output is the one capped string kept from its end. A run's verdict is its last
+ * line, so a cap that kept the head would turn a failing log into a clean-looking one.
+ */
+function capOutputTail(value, cap) {
+  if (value.length <= EVENT_STRING_LIMIT) {
+    return value;
+  }
+  cap.truncated = true;
+  return value.slice(-EVENT_STRING_LIMIT);
+}
+
 /** The structured twin of the human log line: the whole item, unshortened, for the trace. */
 function describeItemRecord(item) {
   switch (item.type) {
@@ -334,7 +347,10 @@ function describeItemRecord(item) {
         status: item.status ?? null,
         exitCode: item.exitCode ?? null,
         durationMs: item.durationMs ?? null,
-        output: item.aggregatedOutput ?? null
+        output: item.aggregatedOutput ?? null,
+        // Counted before the cap can bite, so the trace states the size the command
+        // produced rather than the size that survived the store.
+        outputLines: commandOutputLines(item.aggregatedOutput).length
       };
     case "fileChange":
       return {
@@ -397,6 +413,9 @@ function buildItemRecord(item, measuredDurationMs = null) {
   }
   const cap = { truncated: false };
   const capped = capEventStrings(record, cap);
+  if (record.type === "command" && typeof record.output === "string") {
+    capped.output = capOutputTail(record.output, cap);
+  }
   return cap.truncated ? { ...capped, truncated: true } : capped;
 }
 
@@ -1358,7 +1377,9 @@ export async function runAppServerTurn(cwd, options = {}) {
     const threadId = response.thread.id;
     // The response carries the resolved model even when the request sent null.
     const model = response.model ?? null;
-    const effort = response.reasoningEffort ?? null;
+    // The thread reports its own default. When this turn asks for an effort of its own,
+    // that is the effort that runs, and so it is the effort the job records.
+    const effort = options.effort ?? response.reasoningEffort ?? null;
 
     emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", {
       threadId,

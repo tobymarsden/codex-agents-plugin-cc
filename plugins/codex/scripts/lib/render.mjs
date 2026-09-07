@@ -111,9 +111,9 @@ function appendActiveJobsTable(lines, jobs) {
   lines.push("| Job | Kind | Status | Phase | Elapsed | Codex Session ID | Summary | Actions |");
   lines.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
   for (const job of jobs) {
-    const actions = [`/codex:status ${job.id}`];
+    const actions = [`TaskOutput ${job.id}`];
     if (job.status === "queued" || job.status === "running") {
-      actions.push(`/codex:cancel ${job.id}`);
+      actions.push(`TaskStop ${job.id}`);
     }
     lines.push(
       `| ${escapeMarkdownCell(job.id)} | ${escapeMarkdownCell(job.kindLabel)} | ${escapeMarkdownCell(job.status)} | ${escapeMarkdownCell(job.phase ?? "")} | ${escapeMarkdownCell(job.elapsed ?? "")} | ${escapeMarkdownCell(job.threadId ?? "")} | ${escapeMarkdownCell(job.summary ?? "")} | ${actions.map((action) => `\`${action}\``).join("<br>")} |`
@@ -146,10 +146,10 @@ function pushJobDetails(lines, job, options = {}) {
     lines.push(`  Log: ${job.logFile}`);
   }
   if ((job.status === "queued" || job.status === "running") && options.showCancelHint) {
-    lines.push(`  Cancel: /codex:cancel ${job.id}`);
+    lines.push(`  Cancel: TaskStop ${job.id}`);
   }
   if (job.status !== "queued" && job.status !== "running" && options.showResultHint) {
-    lines.push(`  Result: /codex:result ${job.id}`);
+    lines.push(`  Result: TaskOutput ${job.id}`);
   }
   if (job.status !== "queued" && job.status !== "running" && job.jobClass === "task" && job.write && options.showReviewHint) {
     lines.push("  Review changes: /codex:review --wait");
@@ -450,7 +450,7 @@ const OUTPUT_TAIL_MAX_LINES = 10;
 const OUTPUT_TAIL_WIDTH = 100;
 
 /** The non-blank lines of a command's output: its size, and the tail the trace shows. */
-function commandOutputLines(output) {
+export function commandOutputLines(output) {
   return String(output ?? "")
     .split("\n")
     .map((line) => line.trimEnd())
@@ -480,15 +480,27 @@ function truncateOutputLine(line) {
   return line.length <= OUTPUT_TAIL_WIDTH ? line : `${line.slice(0, OUTPUT_TAIL_WIDTH - 3)}...`;
 }
 
-/** A change's size, counted off its diff, so a new stub reads differently from a rewrite. */
-function formatChangeSize(diff) {
+/**
+ * A change's size, counted off its payload, so a new stub reads differently from a rewrite.
+ * A create or a delete arrives as the file's contents rather than a unified diff, and
+ * without a hunk header there are no line prefixes to read: every line is the change.
+ */
+function formatChangeSize(change) {
+  const text = String(change.diff ?? "");
+  const kind = typeof change.kind === "string" ? change.kind : change.kind?.type;
   let added = 0;
   let removed = 0;
-  for (const line of String(diff ?? "").split("\n")) {
-    if (line.startsWith("+")) {
-      added += line.startsWith("+++") ? 0 : 1;
-    } else if (line.startsWith("-")) {
-      removed += line.startsWith("---") ? 0 : 1;
+  if (!text.includes("@@") && (kind === "add" || kind === "delete")) {
+    const count = text === "" ? 0 : text.replace(/\n$/, "").split("\n").length;
+    added = kind === "add" ? count : 0;
+    removed = kind === "delete" ? count : 0;
+  } else {
+    for (const line of text.split("\n")) {
+      if (line.startsWith("+")) {
+        added += line.startsWith("+++") ? 0 : 1;
+      } else if (line.startsWith("-")) {
+        removed += line.startsWith("---") ? 0 : 1;
+      }
     }
   }
   return `${added > 0 ? `+${added}` : ""}${removed > 0 ? `-${removed}` : ""}`;
@@ -498,10 +510,14 @@ function traceLineBody(record, workspaceRoot) {
   switch (record.type) {
     case "command": {
       const output = commandOutputLines(record.output);
+      // The record counted the output before the store capped it, so the size the trace
+      // states is the size the command produced, and a cap is named rather than hidden.
+      const total = record.outputLines ?? 0;
       const detail = [
         record.exitCode == null ? null : `exit ${record.exitCode}`,
         record.durationMs ? formatDurationMs(record.durationMs) : null,
-        output.length > 0 ? `${output.length} lines out` : null
+        total > 0 ? `${total} ${total === 1 ? "line" : "lines"} out` : null,
+        total > output.length ? `last ${output.length} kept` : null
       ].filter(Boolean);
       const head = detail.length > 0 ? `${record.command} (${detail.join(", ")})` : String(record.command ?? "");
       // An exit code is not an outcome. The tail is where a runner's summary block lands,
@@ -511,7 +527,7 @@ function traceLineBody(record, workspaceRoot) {
     case "fileChange":
       return (record.changes ?? [])
         .map((change) => {
-          const size = formatChangeSize(change.diff);
+          const size = formatChangeSize(change);
           return `${relativeToWorkspace(change.path, workspaceRoot)} (${formatChangeKind(change.kind)}${size ? ` ${size}` : ""})`;
         })
         .join(", ");
@@ -718,7 +734,7 @@ export function renderCancelReport(job) {
   if (job.summary) {
     lines.push(`Summary: ${job.summary}`);
   }
-  lines.push("Read the job to see what it recorded before the stop.");
+  lines.push("Read the job with TaskOutput to see what it recorded before the stop.");
 
   return `${lines.join("\n").trimEnd()}\n`;
 }

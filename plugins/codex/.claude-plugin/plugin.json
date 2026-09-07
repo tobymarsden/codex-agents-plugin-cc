@@ -1,8 +1,8 @@
 {
   "name": "codex",
-  "version": "1.6.0",
-  "description": "Use Codex from Claude Code to review code or delegate tasks.",
+  "version": "2.0.0",
+  "description": "Use Codex agents from Claude Code as if they were native subagents: spawn, watch, steer, resume, stop.",
   "author": {
-    "name": "OpenAI"
+    "name": "Toby Marsden"
   }
 }

@@ -16,8 +16,8 @@ function sleep(milliseconds) {
 }
 
 /** Starts the monitor and collects the notification lines it prints. */
-async function startMonitor(workspace) {
-  const child = spawn(process.execPath, [MONITOR_SCRIPT], { cwd: workspace, stdio: ["ignore", "pipe", "pipe"] });
+async function startMonitor(workspace, { args = [], spawnCwd = workspace } = {}) {
+  const child = spawn(process.execPath, [MONITOR_SCRIPT, ...args], { cwd: spawnCwd, stdio: ["ignore", "pipe", "pipe"] });
   const lines = [];
   let pending = "";
   child.stdout.setEncoding("utf8");
@@ -27,6 +27,7 @@ async function startMonitor(workspace) {
     pending = parts.pop() ?? "";
     lines.push(...parts);
   });
+  const exited = new Promise((resolve) => child.once("close", (code) => resolve(code)));
 
   await new Promise((resolve, reject) => {
     child.once("spawn", resolve);
@@ -35,7 +36,12 @@ async function startMonitor(workspace) {
   // Let the monitor take its startup snapshot of already-finished jobs before the test
   // drives any transition.
   await sleep(500);
-  return { child, lines };
+  return { child, lines, exited };
+}
+
+/** Resolves to the monitor's exit code, or to "still running" if it never finishes. */
+function waitForExit(exited, timeoutMs = 20000) {
+  return Promise.race([exited, sleep(timeoutMs).then(() => "still running")]);
 }
 
 async function waitForLines(lines, count, timeoutMs = 20000) {
@@ -132,6 +138,59 @@ test("the monitor survives a missing state file and keeps running", async () => 
     await waitForLines(lines, 1);
     assert.deepEqual(lines, [
       "Codex job task-first completed in 3m 3s: first job of the session — read it with TaskOutput."
+    ]);
+  } finally {
+    child.kill();
+  }
+});
+
+test("the monitor given --job announces only that job and then exits", async () => {
+  const workspace = makeTempDir();
+  upsertJob(workspace, { id: "task-watched", status: "running" });
+  upsertJob(workspace, { id: "task-other", status: "running" });
+
+  const { child, lines, exited } = await startMonitor(workspace, { args: ["--job", "task-watched"] });
+  try {
+    upsertJob(workspace, finishedJob({ id: "task-other", status: "completed", summary: "a job nobody armed a watch for" }));
+    upsertJob(
+      workspace,
+      finishedJob({ id: "task-watched", status: "completed", summary: "the job the caller is waiting on" })
+    );
+
+    assert.equal(await waitForExit(exited), 0);
+    assert.deepEqual(lines, [
+      "Codex job task-watched completed in 3m 3s: the job the caller is waiting on — read it with TaskOutput."
+    ]);
+  } finally {
+    child.kill();
+  }
+});
+
+test("the monitor given --cwd watches that workspace rather than the one it runs in", async () => {
+  const watched = makeTempDir();
+  const elsewhere = makeTempDir();
+  // The same job id lives in both workspaces, so the summary in the line says which
+  // state directory the monitor actually read.
+  upsertJob(watched, { id: "task-shared-id", status: "running" });
+  upsertJob(elsewhere, { id: "task-shared-id", status: "running" });
+
+  const { child, lines, exited } = await startMonitor(watched, {
+    args: ["--cwd", watched, "--job", "task-shared-id"],
+    spawnCwd: elsewhere
+  });
+  try {
+    upsertJob(
+      elsewhere,
+      finishedJob({ id: "task-shared-id", status: "completed", summary: "the job in the process's own directory" })
+    );
+    upsertJob(
+      watched,
+      finishedJob({ id: "task-shared-id", status: "completed", summary: "the job in the watched workspace" })
+    );
+
+    assert.equal(await waitForExit(exited), 0);
+    assert.deepEqual(lines, [
+      "Codex job task-shared-id completed in 3m 3s: the job in the watched workspace — read it with TaskOutput."
     ]);
   } finally {
     child.kill();

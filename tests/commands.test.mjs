@@ -6,9 +6,39 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
+const THIS_FILE = fileURLToPath(import.meta.url);
 
 function read(relativePath) {
   return fs.readFileSync(path.join(PLUGIN_ROOT, relativePath), "utf8");
+}
+
+/**
+ * Repo-relative paths of the shipped .mjs/.md/.json files under `roots` that match
+ * `pattern`. CHANGELOG.md is history, and this file holds the patterns themselves.
+ */
+function filesMatching(roots, pattern) {
+  const hits = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== ".generated") {
+          walk(full);
+        }
+      } else if (
+        /\.(mjs|md|json)$/.test(entry.name) &&
+        entry.name !== "CHANGELOG.md" &&
+        full !== THIS_FILE &&
+        pattern.test(fs.readFileSync(full, "utf8"))
+      ) {
+        hits.push(path.relative(ROOT, full));
+      }
+    }
+  };
+  for (const root of roots) {
+    walk(root);
+  }
+  return hits;
 }
 
 test("review command uses AskUserQuestion and background Bash while staying review-only", () => {
@@ -70,24 +100,30 @@ test("adversarial review command uses AskUserQuestion and background Bash while 
   assert.match(source, /can still take extra focus text after the flags/i);
 });
 
-test("continue is not exposed as a user-facing command", () => {
+test("only the commands the agents tools cannot replace are exposed", () => {
   const commandFiles = fs.readdirSync(path.join(PLUGIN_ROOT, "commands")).sort();
+  // status, result and cancel duplicated ListAgents, TaskOutput and TaskStop exactly, so a
+  // session that has the tools has no use for a slash command to reach them.
   assert.deepEqual(commandFiles, [
     "adversarial-review.md",
-    "cancel.md",
     "rescue.md",
-    "result.md",
     "review.md",
     "setup.md",
-    "status.md",
     "transfer.md"
   ]);
+});
+
+test("nothing points at the retired status, result, and cancel commands", () => {
+  assert.deepEqual(
+    filesMatching([PLUGIN_ROOT, path.join(ROOT, "tests"), path.join(ROOT, "scripts")], /\/codex:(status|result|cancel)/),
+    []
+  );
 });
 
 test("rescue drives the agents MCP tool from the main thread instead of a subagent", () => {
   const rescue = read("commands/rescue.md");
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
-  const runtimeSkill = read("skills/codex-cli-runtime/SKILL.md");
+  const runtimeSkill = read("skills/codex-agents/SKILL.md");
 
   // The rescue subagent is retired: each forwarded call spent tens of thousands of
   // subagent tokens to make one Bash call, so the command now calls the plugin's own
@@ -107,7 +143,7 @@ test("rescue drives the agents MCP tool from the main thread instead of a subage
   assert.match(rescue, /--background\|--wait/);
   assert.match(rescue, /--resume\|--fresh/);
   assert.match(rescue, /--model <model\|spark>/);
-  assert.match(rescue, /--effort <none\|minimal\|low\|medium\|high\|xhigh>/);
+  assert.match(rescue, /--effort <low\|medium\|high\|xhigh\|max>/);
   assert.match(rescue, /task-resume-candidate --json/);
   assert.match(rescue, /AskUserQuestion/);
   assert.match(rescue, /Continue current Codex thread/);
@@ -119,7 +155,7 @@ test("rescue drives the agents MCP tool from the main thread instead of a subage
   assert.match(rescue, /`--model` and `--effort` are runtime-selection flags/i);
   assert.match(rescue, /Pass them as the `model` and `effort` parameters/i);
   assert.match(rescue, /Leave `effort` unset unless the user explicitly asks for a specific reasoning effort/i);
-  assert.match(rescue, /accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`/i);
+  assert.match(rescue, /accepted values are `low`, `medium`, `high`, `xhigh`, and `max`, and it defaults to `high`/i);
   assert.match(rescue, /`spark` maps to the current Codex Spark model/i);
   assert.match(rescue, /If the request includes `--resume`, do not ask whether to continue/i);
   assert.match(rescue, /If the request includes `--fresh`, do not ask whether to continue/i);
@@ -146,11 +182,9 @@ test("rescue drives the agents MCP tool from the main thread instead of a subage
   assert.match(runtimeSkill, /`--resume` and `--job <id>` to `resume: <job id>`/i);
   assert.match(runtimeSkill, /Pass `write: true` by default unless the user asks for read-only work/i);
   assert.match(runtimeSkill, /leave model and effort unset unless requested/i);
-  assert.match(runtimeSkill, /`effort` accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`/i);
   assert.match(runtimeSkill, /never inspect the repository or perform follow-up work/i);
   assert.match(runtimeSkill, /If the tool call fails or Codex cannot be invoked, report that failure and stop/i);
   assert.doesNotMatch(runtimeSkill, /gpt-5\.3-codex-spark|gpt-5-4-prompting/);
-  assert.match(readme, /if you do not pass `--model` or `--effort`, Codex chooses its own defaults/i);
   assert.match(readme, /--model gpt-5\.5 --effort medium/i);
   assert.match(readme, /`spark` maps to the current Codex Spark model/i);
   assert.match(readme, /continue a previous Codex task/i);
@@ -161,30 +195,32 @@ test("rescue drives the agents MCP tool from the main thread instead of a subage
   assert.match(readme, /--base main challenge whether this was the right caching and retry design/);
   assert.match(readme, /### `\/codex:rescue`/);
   assert.match(readme, /### `\/codex:transfer`/);
-  assert.match(readme, /### `\/codex:status`/);
-  assert.match(readme, /### `\/codex:result`/);
-  assert.match(readme, /### `\/codex:cancel`/);
 });
 
-test("transfer, result, and cancel commands are exposed as deterministic runtime entrypoints", () => {
+test("transfer stays a deterministic runtime entrypoint", () => {
   const transfer = read("commands/transfer.md");
-  const result = read("commands/result.md");
-  const cancel = read("commands/cancel.md");
-  const resultHandling = read("skills/codex-result-handling/SKILL.md");
 
   assert.match(transfer, /disable-model-invocation:\s*true/);
   assert.match(transfer, /codex-companion\.mjs" transfer "\$ARGUMENTS"/);
   assert.match(transfer, /codex resume <session-id>/);
-  assert.match(result, /disable-model-invocation:\s*true/);
-  assert.match(result, /codex-companion\.mjs" result "\$ARGUMENTS"/);
-  assert.match(cancel, /disable-model-invocation:\s*true/);
-  assert.match(cancel, /codex-companion\.mjs" cancel "\$ARGUMENTS"/);
-  assert.match(resultHandling, /do not turn a failed or incomplete Codex run into a Claude-side implementation attempt/i);
-  assert.match(resultHandling, /if Codex was never successfully invoked, do not generate a substitute answer at all/i);
+});
+
+test("one codex-agents skill covers driving Codex and relaying its output", () => {
+  const skills = fs.readdirSync(path.join(PLUGIN_ROOT, "skills")).sort();
+  assert.deepEqual(skills, ["codex-agents", "codex-prompting"]);
+
+  const agentsSkill = read("skills/codex-agents/SKILL.md");
+  assert.match(agentsSkill, /^name: codex-agents$/m);
+  assert.match(agentsSkill, /^description: "How a Claude session drives Codex agents and relays their output"$/m);
+  assert.match(agentsSkill, /## The agents MCP tools/);
+  assert.match(agentsSkill, /## Relaying what came back/);
+  assert.match(agentsSkill, /do not turn a failed or incomplete Codex run into a Claude-side implementation attempt/i);
+  assert.match(agentsSkill, /if Codex was never successfully invoked, do not generate a substitute answer at all/i);
+  assert.match(agentsSkill, /Auto-applying fixes from a review is strictly forbidden/i);
 });
 
 test("internal docs use task terminology for rescue runs", () => {
-  const runtimeSkill = read("skills/codex-cli-runtime/SKILL.md");
+  const runtimeSkill = read("skills/codex-agents/SKILL.md");
   const promptingSkill = read("skills/codex-prompting/SKILL.md");
   const promptRecipes = read("skills/codex-prompting/references/codex-prompt-recipes.md");
 
@@ -193,7 +229,7 @@ test("internal docs use task terminology for rescue runs", () => {
   assert.match(promptingSkill, /Use `task` when the task is diagnosis/i);
   assert.match(promptingSkill, /`\/codex:rescue`/);
   assert.match(promptRecipes, /In `\/codex:rescue`, run diagnosis and fix-oriented recipes in write mode by default/i);
-  for (const source of [promptingSkill, promptRecipes, read("skills/codex-result-handling/SKILL.md")]) {
+  for (const source of [promptingSkill, promptRecipes, runtimeSkill]) {
     assert.doesNotMatch(source, /codex:codex-rescue/);
   }
   assert.match(promptRecipes, /Codex task prompts/i);
@@ -202,16 +238,33 @@ test("internal docs use task terminology for rescue runs", () => {
   assert.match(promptRecipes, /## Narrow Fix/);
 });
 
-test("the plugin declares a job-completion monitor Claude Code can start", () => {
-  const monitors = JSON.parse(read(path.join("monitors", "monitors.json")));
+test("the plugin declares no background monitor; the per-job Monitor command is the only path", () => {
+  // A declared monitor and the per-job command would both watch the same job and announce
+  // it twice in an interactive CLI, and the declared one never starts in the desktop app.
+  assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, "monitors")), false);
+  assert.deepEqual(
+    filesMatching([PLUGIN_ROOT, path.join(ROOT, "tests"), path.join(ROOT, "scripts")], /monitors\.json|codex-jobs/),
+    []
+  );
 
-  assert.equal(Array.isArray(monitors), true);
-  assert.equal(monitors.length, 1);
-  const [monitor] = monitors;
-  assert.equal(monitor.name, "codex-jobs");
-  assert.equal(monitor.description, "Codex job completions");
-  assert.equal(monitor.command, 'node "${CLAUDE_PLUGIN_ROOT}/scripts/job-completion-monitor.mjs"');
+  // The watched command stays: --job makes it self-terminating, and it works everywhere.
   assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, "scripts", "job-completion-monitor.mjs")), true);
+  const agentsSkill = read("skills/codex-agents/SKILL.md");
+  assert.match(agentsSkill, /job-completion-monitor\.mjs" --job <id> \[--cwd "<dir>"\]/);
+  assert.match(agentsSkill, /no notification arrives unless the session asks for one/i);
+  assert.match(agentsSkill, /Pass the printed command to the Monitor tool/i);
+});
+
+test("no file offers none or minimal as a reasoning effort", () => {
+  // Probed against the live server: it accepts max, xhigh, high, medium and low, and
+  // rejects minimal. Nothing shipped may go on advertising the old list.
+  assert.deepEqual(
+    filesMatching(
+      [path.join(PLUGIN_ROOT, "commands"), path.join(PLUGIN_ROOT, "skills"), path.join(PLUGIN_ROOT, "scripts")],
+      /(effort|reasoning)[^\n]*\b(none|minimal)\b|\b(none|minimal)\b[^\n]*effort/i
+    ),
+    []
+  );
 });
 
 test("hooks keep session-end cleanup and stop gating enabled", () => {

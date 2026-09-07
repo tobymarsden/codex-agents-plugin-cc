@@ -379,6 +379,72 @@ function traceItems(turnId, cwd, payload) {
   ];
 }
 
+// Well past the 100000 characters the event store keeps, and the line that decides the run
+// is the last one: a cap that kept the head would report this import as clean.
+const LONG_COMMAND_OUTPUT = (function () {
+  const lines = [];
+  for (let index = 1; index <= 4000; index += 1) {
+    lines.push("record " + index + " processed " + "-".repeat(40));
+  }
+  lines.push("DONE: 4000 records, 0 errors");
+  return lines.join("\\n");
+})();
+
+// A create and a delete arrive as the file's contents, not a unified diff. The bullet list
+// is the trap: those lines start with "-" without being removals.
+const NOTES_FILE_CONTENT = [
+  "# Notes",
+  "",
+  "- capture the failing case",
+  "- add the regression test",
+  "- update the runbook",
+  "",
+  "Owner: platform",
+  "Status: draft"
+].join("\\n");
+
+const STALE_FILE_CONTENT = ["const stale = true;", "module.exports = stale;"].join("\\n");
+
+function rawPayloadItems(turnId, cwd, payload) {
+  const importCommand = {
+    type: "commandExecution",
+    id: "cmd_import_" + turnId,
+    command: "node scripts/import.js",
+    cwd,
+    source: "agent",
+    status: "inProgress",
+    commandActions: [],
+    aggregatedOutput: null,
+    exitCode: null,
+    durationMs: null
+  };
+  const oneLine = { ...importCommand, id: "cmd_head_" + turnId, command: "git rev-parse --short HEAD" };
+  return [
+    {
+      started: importCommand,
+      completed: { ...importCommand, status: "completed", aggregatedOutput: LONG_COMMAND_OUTPUT, exitCode: 0, durationMs: 115 }
+    },
+    {
+      started: oneLine,
+      completed: { ...oneLine, status: "completed", aggregatedOutput: "9f2c1ab", exitCode: 0, durationMs: 12 }
+    },
+    {
+      completed: {
+        type: "fileChange",
+        id: "chg_" + turnId,
+        status: "completed",
+        changes: [
+          { path: cwd + "/NOTES.md", kind: { type: "add" }, diff: NOTES_FILE_CONTENT },
+          { path: cwd + "/src/stale.js", kind: { type: "delete" }, diff: STALE_FILE_CONTENT }
+        ]
+      }
+    },
+    {
+      completed: { type: "agentMessage", id: "msg_" + turnId, text: payload, phase: "final_answer" }
+    }
+  ];
+}
+
 function taskPayload(prompt, resume) {
   if (prompt.includes("<task>") && prompt.includes("Only review the work from the previous Claude turn.")) {
     if (BEHAVIOR === "adversarial-clean") {
@@ -720,7 +786,40 @@ rl.on("line", (line) => {
           break;
         }
 
-        const items = BEHAVIOR === "with-trace" ? traceItems(turnId, thread.cwd, payload) : [
+        if (BEHAVIOR === "turn-error-json") {
+          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+          send({
+            method: "error",
+            params: {
+              threadId: thread.id,
+              turnId,
+              error: {
+                message: JSON.stringify(
+                  {
+                    error: {
+                      message: "Reasoning effort 'minimal' is not supported by model gpt-5.6-sol.",
+                      type: "invalid_request_error",
+                      code: "unsupported_value"
+                    }
+                  },
+                  null,
+                  2
+                )
+              }
+            }
+          });
+          send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "failed") } });
+          break;
+        }
+
+        const scriptedItems =
+          BEHAVIOR === "with-trace"
+            ? traceItems(turnId, thread.cwd, payload)
+            : BEHAVIOR === "with-raw-payloads"
+              ? rawPayloadItems(turnId, thread.cwd, payload)
+              : null;
+
+        const items = scriptedItems ?? [
           ...(BEHAVIOR === "with-reasoning"
             ? [
                 {

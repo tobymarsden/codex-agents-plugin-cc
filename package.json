@@ -1,9 +1,9 @@
 {
-  "name": "@openai/codex-plugin-cc",
-  "version": "1.6.0",
+  "name": "@tobymarsden/codex-agents-plugin-cc",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Use Codex from Claude Code to review code or delegate tasks.",
+  "description": "Drive Codex agents from Claude Code with the same verbs as native subagents.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18.18.0"
@@ -18,5 +18,6 @@
   "devDependencies": {
     "@types/node": "^25.5.0",
     "typescript": "^6.0.2"
-  }
+  },
+  "author": "Toby Marsden"
 }

@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation, an explicit fix request, or follow-up rescue work to Codex
-argument-hint: "[--background|--wait] [--resume|--fresh|--job <id>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--resume|--fresh|--job <id>] [--model <model|spark>] [--effort <low|medium|high|xhigh|max>] [what Codex should investigate, solve, or continue]"
 allowed-tools: Bash(node:*), AskUserQuestion, mcp__plugin_codex_agents__Agent, mcp__plugin_codex_agents__SendMessage
 ---
 
@@ -44,9 +44,9 @@ Operating rules:
 - If the user is redirecting, steering, or adding instructions to a Codex job that is currently running and names it (a job id, or "the running task" when only one is running), that single call is `mcp__plugin_codex_agents__SendMessage` with `to` set to that job id instead.
 - Return the tool output verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
-- Do not inspect files, monitor progress, poll `/codex:status`, fetch `/codex:result`, call `/codex:cancel`, summarize output, or do follow-up work of your own.
-- Leave `effort` unset unless the user explicitly asks for a specific reasoning effort. Its accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
-- Leave `model` unset unless the user explicitly asks for one. `spark` maps to the current Codex Spark model (the alias lives in `MODEL_ALIASES` in `codex-companion.mjs`).
+- Do not inspect files, monitor progress, poll `ListAgents`, fetch `TaskOutput`, call `TaskStop`, summarize output, or do follow-up work of your own.
+- Leave `effort` unset unless the user explicitly asks for a specific reasoning effort. Its accepted values are `low`, `medium`, `high`, `xhigh`, and `max`, and it defaults to `high`.
+- Leave `model` unset unless the user explicitly asks for one; unset means the plugin's default model. `spark` maps to the current Codex Spark model (the alias lives in `MODEL_ALIASES` in `codex-companion.mjs`).
 - `--resume` and `--job <id>` both become `resume: <job id>`, which continues that job's Codex thread. `--fresh` means leave `resume` unset.
 - Pass `write: true` by default unless the user explicitly asks for read-only work, review, diagnosis, or research without edits. `write: true` gives Codex full access with no sandbox.
 - Preserve the user's task text as-is in `prompt` apart from stripping the flags above. Do not reshape it into a better prompt, reason through the problem yourself, or draft a solution.

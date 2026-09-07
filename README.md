@@ -12,7 +12,7 @@ they already have.
 - `Agent`, `SendMessage`, `TaskOutput`, `TaskStop`, and `ListAgents` MCP tools let a Claude session drive Codex like a subagent
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
-- `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
+- `/codex:rescue` to delegate work and `/codex:transfer` to hand off a session
 
 ## Requirements
 
@@ -25,7 +25,7 @@ they already have.
 Add the marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add tobymarsden/codex-plugin-cc
+/plugin marketplace add tobymarsden/codex-agents-plugin-cc
 ```
 
 Install the plugin:
@@ -69,8 +69,6 @@ One simple first run is:
 
 ```bash
 /codex:review --background
-/codex:status
-/codex:result
 ```
 
 ## Usage
@@ -97,7 +95,7 @@ Examples:
 /codex:review --background
 ```
 
-This command is read-only and will not perform any changes. When run in the background you can use [`/codex:status`](#codexstatus) to check on the progress and [`/codex:cancel`](#codexcancel) to cancel the ongoing task.
+This command is read-only and will not perform any changes. When run in the background, read its progress with the `TaskOutput` tool and stop it with `TaskStop`.
 
 ### `/codex:adversarial-review`
 
@@ -160,7 +158,7 @@ Ask Codex to redesign the database connection to be more resilient.
 
 **Notes:**
 
-- if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
+- if you do not pass `--model` or `--effort`, the plugin runs `gpt-6-astra` at `high` effort.
 - `spark` maps to the current Codex Spark model (the alias lives in `MODEL_ALIASES` in `codex-companion.mjs`)
 - follow-up rescue requests can continue the latest Codex task in the repo
 - rescue runs add `--write` by default unless you ask for read-only work, and `--write` gives Codex full access with no sandbox
@@ -215,26 +213,9 @@ Examples:
 
 The plugin's existing `SessionStart` hook supplies the current transcript path automatically; `--source` is available as a manual override. The transfer uses Codex's external-agent session importer, so it follows the same conversion rules as importing Claude history in the Codex App and creates visible turns that can be continued in the App or TUI. The source must be under `~/.claude/projects`, and older Codex versions that do not expose session import must be upgraded before using this command.
 
-### `/codex:status`
-
-Shows running and recent Codex jobs for the current repository.
-
-Examples:
-
-```bash
-/codex:status
-/codex:status task-abc123
-```
-
-Use it to:
-
-- check progress on background work
-- see the latest completed job
-- confirm whether a task is still running
-
 ### Steering a running job
 
-Two `codex-companion` subcommands address a job by the id `/codex:status` shows:
+Two `codex-companion` subcommands address a job by the id `Agent` returned:
 
 ```bash
 steer <job-id> <text>
@@ -243,29 +224,6 @@ output <job-id> --wait <ms>
 
 `steer` adds the text to the job's running turn, which Codex picks up at its next step.
 `output --wait` blocks until the job finishes or the timeout elapses, then prints its state, log tail, and final output.
-
-### `/codex:result`
-
-Shows the final stored Codex output for a finished job.
-When available, it also includes the Codex session ID so you can reopen that run directly in Codex with `codex resume <session-id>`.
-
-Examples:
-
-```bash
-/codex:result
-/codex:result task-abc123
-```
-
-### `/codex:cancel`
-
-Cancels an active background Codex job.
-
-Examples:
-
-```bash
-/codex:cancel
-/codex:cancel task-abc123
-```
 
 ### `/codex:setup`
 
@@ -307,12 +265,7 @@ When the review gate is enabled, the plugin uses a `Stop` hook to run a targeted
 /codex:rescue --background investigate the flaky test
 ```
 
-Then check in with:
-
-```bash
-/codex:status
-/codex:result
-```
+Then read them with the `TaskOutput` tool, or list them with `ListAgents`.
 
 ## Codex Integration
 
@@ -337,7 +290,7 @@ Check out the Codex docs for more [configuration options](https://developers.ope
 
 ### Moving The Work Over To Codex
 
-Delegated tasks and any [stop gate](#what-does-the-review-gate-do) run can also be directly resumed inside Codex by running `codex resume` either with the specific session ID you received from running `/codex:result` or `/codex:status` or by selecting it from the list.
+Delegated tasks and any [stop gate](#what-does-the-review-gate-do) run can also be directly resumed inside Codex by running `codex resume` either with the specific session ID that `TaskOutput` reports or by selecting it from the list.
 
 This way you can review the Codex work or continue the work there.
 

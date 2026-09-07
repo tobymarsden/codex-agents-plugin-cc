@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.0.0
+
+Breaking: the plugin narrows to one job, letting a Claude session drive Codex agents the way it drives native subagents.
+
+- The `/codex:status`, `/codex:result` and `/codex:cancel` commands are removed; `ListAgents`, `TaskOutput` and `TaskStop` do the same work from the session
+- The declared background monitor is removed. It never started in the desktop app, and alongside the per-job Monitor command it would have announced the same job twice. `Agent` hands the caller a self-terminating Monitor command instead, with the state directory pinned into it so it cannot silently watch the wrong place
+- Tasks default to `gpt-6-astra` at `high` effort; naming a model or an effort still wins. Accepted efforts are `low`, `medium`, `high`, `xhigh` and `max`, which is what the models actually take: the old list offered `none` and `minimal`, which `gpt-6-astra` rejects, and omitted `max`, which it accepts
+- The `codex-cli-runtime` and `codex-result-handling` skills merge into one `codex-agents` skill
+- Command output is recorded from its end rather than its beginning, so a long log that fails on its last line no longer reads as a clean run, and the trace states the true line count and how much was kept
+- A newly added file reports its real size instead of counting content lines that happen to start with a hyphen
+- The effort a job reports is the effort the turn requested, not the thread's default
+- A failed job carries a real reason rather than the first brace of an error blob
+- Author: Toby Marsden
+
 ## 1.6.0
 
 - The plugin ships a background monitor, so an installed plugin notifies the session itself when a Codex job finishes, with no command to run. Monitors are experimental: they start only in interactive CLI sessions and do not load for a project-scope plugin, so the `output --wait` recipe remains the fallback

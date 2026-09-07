@@ -15,6 +15,7 @@ import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const COMPANION_SCRIPT = path.join(PLUGIN_ROOT, "scripts", "codex-companion.mjs");
+const MONITOR_SCRIPT = path.join(PLUGIN_ROOT, "scripts", "job-completion-monitor.mjs");
 const PLUGIN_MANIFEST = path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json");
 const SERVER_NAME = "codex-agents";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
@@ -116,15 +117,15 @@ const TOOLS = [
   {
     name: "Agent",
     description:
-      "Run a Codex task in this workspace. Returns the result, or with run_in_background a job id to use with TaskOutput, SendMessage, and TaskStop. cwd sets the workspace.",
+      "Run a Codex task in this workspace. Returns the result, or with run_in_background a job id to use with TaskOutput, SendMessage, and TaskStop, plus a ready-to-arm Monitor command that announces the job when it finishes. cwd sets the workspace.",
     inputSchema: {
       type: "object",
       properties: {
         prompt: { type: "string", description: "What Codex should do." },
         run_in_background: { type: "boolean", description: "Return a job id immediately instead of waiting." },
         write: { type: "boolean", description: "Give Codex full write access with no sandbox." },
-        model: { type: "string", description: "Codex model to use." },
-        effort: { type: "string", description: "Reasoning effort: none, minimal, low, medium, high, or xhigh." },
+        model: { type: "string", description: "Codex model to use; omit to use the plugin's default." },
+        effort: { type: "string", description: "low, medium, high, xhigh, or max; defaults to high." },
         resume: { type: "string", description: "Job id whose Codex thread this task continues." },
         cwd: CWD_SCHEMA
       },
@@ -155,10 +156,21 @@ const TOOLS = [
       }
 
       const payload = await cliJson(["task", ...flags, "--json", prompt]);
+      // An MCP tool cannot push into the Claude session, so hand the caller a command it
+      // can arm itself. The state directory comes from CLAUDE_PLUGIN_DATA, so pin this
+      // server's value into the command: a watch that reads a different directory never
+      // fires, and says nothing about why.
+      const stateDir = process.env.CLAUDE_PLUGIN_DATA;
+      const watchCommand =
+        (stateDir ? `CLAUDE_PLUGIN_DATA=${JSON.stringify(stateDir)} ` : "") +
+        `node ${JSON.stringify(MONITOR_SCRIPT)} --job ${payload.jobId}` +
+        (workspace.length > 0 ? ` --cwd ${JSON.stringify(workspace[1])}` : "");
       return (
-        `Started Codex job ${payload.jobId}. Read it with TaskOutput. ` +
-        "To be woken when it finishes instead of polling, run this under a background Bash call:\n" +
-        `node ${JSON.stringify(COMPANION_SCRIPT)} output ${payload.jobId} --wait 3600000${workspace.length > 0 ? ` --cwd ${workspace[1]}` : ""}`
+        `Started Codex job ${payload.jobId}. Read it with TaskOutput.\n` +
+        "To be notified when it finishes, watch it with the Monitor tool:\n" +
+        `  command: ${watchCommand}\n` +
+        `  description: Codex job ${payload.jobId}\n` +
+        "Or run that same command under a background Bash call."
       );
     }
   },
@@ -204,7 +216,7 @@ const TOOLS = [
   {
     name: "TaskOutput",
     description:
-      "Read a Codex job at one of three levels: the final result and metadata by default, a numbered trace of every action with trace, or the whole record behind one numbered line with step. block waits until it finishes or timeout. tail includes that many lines of the job's log on request; the log's path is reported either way. For a completion notification instead of polling, run the output --wait command that Agent printed under a background Bash call.",
+      "Read a Codex job at one of three levels: the final result and metadata by default, a numbered trace of every action with trace, or the whole record behind one numbered line with step. block waits until it finishes or timeout. tail includes that many lines of the job's log on request; the log's path is reported either way. For a completion notification instead of polling, arm the Monitor command that Agent printed with the Monitor tool, or run it under a background Bash call.",
     inputSchema: {
       type: "object",
       properties: {

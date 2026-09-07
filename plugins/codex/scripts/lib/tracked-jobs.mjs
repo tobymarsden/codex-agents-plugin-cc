@@ -200,7 +200,9 @@ export async function runTrackedJob(job, runner, options = {}) {
       turnId: execution.turnId ?? null,
       model: execution.model ?? null,
       effort: execution.effort ?? null,
-      tokenUsage: execution.tokenUsage ?? null
+      tokenUsage: execution.tokenUsage ?? null,
+      // A run that finished and failed carries its reason too; only a throw did before.
+      errorMessage: execution.errorMessage ?? null
     };
     writeJobFile(job.workspaceRoot, job.id, {
       ...runningRecord,

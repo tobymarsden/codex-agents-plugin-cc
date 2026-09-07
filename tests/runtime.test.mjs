@@ -841,6 +841,24 @@ test("task --fresh is treated as routing control and does not leak into the prom
   assert.equal(fakeState.lastTurnStart.prompt, "diagnose the flaky test");
 });
 
+test("a task that names neither model nor effort runs on the plugin's defaults", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const result = run("node", [SCRIPT, "task", "diagnose the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const { lastTurnStart } = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(lastTurnStart.model, "gpt-6-astra");
+  assert.equal(lastTurnStart.effort, "high");
+});
+
 test("task forwards model selection and reasoning effort to app-server turn/start", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -860,6 +878,31 @@ test("task forwards model selection and reasoning effort to app-server turn/star
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
   assert.equal(fakeState.lastTurnStart.model, "gpt-5.3-codex-spark");
   assert.equal(fakeState.lastTurnStart.effort, "low");
+
+  // The thread's own default is "medium"; the turn asked for "low", and what the turn asked
+  // for is what ran, so it is what the job reports.
+  const job = JSON.parse(fs.readFileSync(path.join(resolveStateDir(repo), "state.json"), "utf8")).jobs.find(
+    (candidate) => candidate.jobClass === "task"
+  );
+  assert.equal(job.effort, "low");
+});
+
+test("an effort this side has never heard of reaches Codex instead of being refused here", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const statePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  // "max" is real for the default model and was not in the list this side used to hold;
+  // which efforts a model takes is the server's to say.
+  const result = run("node", [SCRIPT, "task", "--effort", "  MAX  ", "diagnose the failing test"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).lastTurnStart.effort, "max");
 });
 
 test("task logs reasoning summaries and assistant messages to the job log", () => {
@@ -1223,7 +1266,7 @@ test("status shows phases, hints, and the latest finished job", () => {
   assert.match(result.stdout, /Active jobs:/);
   assert.match(result.stdout, /\| Job \| Kind \| Status \| Phase \| Elapsed \| Codex Session ID \| Summary \| Actions \|/);
   assert.match(result.stdout, /\| review-live \| review \| running \| reviewing \| .* \| thr_1 \| Review working tree diff \|/);
-  assert.match(result.stdout, /`\/codex:status review-live`<br>`\/codex:cancel review-live`/);
+  assert.match(result.stdout, /`TaskOutput review-live`<br>`TaskStop review-live`/);
   assert.match(result.stdout, /Live details:/);
   assert.match(result.stdout, /Latest finished:/);
   assert.match(result.stdout, /Progress:/);
@@ -1907,6 +1950,8 @@ test("a cancelled job keeps the tokens its interrupted turn spent and reports th
   assert.doesNotMatch(cancelled.stdout, /^#/m, "the cancel report is status lines, not a markdown document");
   assert.doesNotMatch(cancelled.stdout, /Title:/);
   assert.doesNotMatch(cancelled.stdout, /\/codex:/, "a tool caller cannot run a slash command");
+  // Naming the read is the whole point of the closing line.
+  assert.match(cancelled.stdout, /^Read the job with TaskOutput to see what it recorded before the stop\.$/m);
 
   const indexed = JSON.parse(fs.readFileSync(statePath, "utf8")).jobs.find((job) => job.id === jobId);
   assert.equal(indexed.status, "cancelled");
@@ -2218,7 +2263,7 @@ test("output renders a finished job as text", () => {
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.ok(rendered.stdout.startsWith(`Job ${finishedJob.id}: completed`), rendered.stdout);
   assert.match(rendered.stdout, /Handled the requested task/);
-  assert.match(rendered.stdout, /^Model: gpt-test \(medium\)  Tokens: \d+ total, /m);
+  assert.match(rendered.stdout, /^Model: gpt-6-astra \(high\)  Tokens: \d+ total, /m);
 
   // A default read points at the trail instead of pasting it in.
   const snapshot = JSON.parse(run("node", [SCRIPT, "output", finishedJob.id, "--json"], { cwd: repo, env }).stdout);
@@ -2366,6 +2411,68 @@ test("output --step returns the whole record behind one trace line", () => {
   assert.match(tool.stdout, /^Tool: docs\/search$/m);
   assert.match(tool.stdout, /^Arguments:\n\{\n {2}"query": "retry policy",\n {2}"limit": 3\n\}$/m);
   assert.match(tool.stdout, /^Result:\n\{\n {2}"hits": \[\n {4}"docs\/retry\.md"\n {2}\]\n\}$/m);
+});
+
+function runRawPayloadFixtureTask(repo) {
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "with-raw-payloads");
+  commitFixtureRepo(repo);
+  const env = buildEnv(binDir);
+
+  const finished = run("node", [SCRIPT, "task", "import the records"], { cwd: repo, env });
+  assert.equal(finished.status, 0, finished.stderr);
+  endFixtureSession(repo, env);
+
+  const statePath = path.join(resolveStateDir(repo), "state.json");
+  const job = JSON.parse(fs.readFileSync(statePath, "utf8")).jobs.find((candidate) => candidate.jobClass === "task");
+  return { job, env };
+}
+
+test("a capped command output keeps its end, and the trace states the count before the cap", () => {
+  const repo = makeTempDir();
+  const { job, env } = runRawPayloadFixtureTask(repo);
+
+  const records = fs
+    .readFileSync(job.eventsFile, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+
+  const imported = records[0];
+  assert.equal(imported.command, "node scripts/import.js");
+  assert.equal(imported.truncated, true, "the fixture's output is longer than the store's cap");
+  assert.equal(imported.output.length, 100000);
+  // The last line is the one that decides the run, so it is the one the cap must keep.
+  assert.ok(imported.output.endsWith("DONE: 4000 records, 0 errors"), imported.output.slice(-80));
+  assert.doesNotMatch(imported.output, /^record 1 processed/m, "the head is what the cap drops now");
+  // The count is the output's own, taken before the cap could shrink it.
+  assert.equal(imported.outputLines, 4001);
+
+  const traced = run("node", [SCRIPT, "output", job.id, "--trace"], { cwd: repo, env });
+  assert.equal(traced.status, 0, traced.stderr);
+
+  const commandLine = traced.stdout.split("\n").find((line) => line.includes("node scripts/import.js"));
+  const stated = /\(exit 0, 115ms, 4001 lines out, last (\d+) kept\)$/.exec(commandLine);
+  assert.ok(stated, commandLine);
+  const kept = Number(stated[1]);
+  assert.ok(kept > 0 && kept < 4001, `kept ${kept}`);
+  assert.match(traced.stdout, /^ {15}DONE: 4000 records, 0 errors$/m);
+
+  // A command whose output survives whole says so without a kept count, and says it singular.
+  assert.match(traced.stdout, /^2\. command {5}git rev-parse --short HEAD \(exit 0, 12ms, 1 line out\)$/m);
+});
+
+test("a create and a delete sent as file contents are sized whole, never negative", () => {
+  const repo = makeTempDir();
+  const { job, env } = runRawPayloadFixtureTask(repo);
+
+  const traced = run("node", [SCRIPT, "output", job.id, "--trace"], { cwd: repo, env });
+  assert.equal(traced.status, 0, traced.stderr);
+
+  // The payload is the file's contents: three of its eight lines open with "-" without
+  // being removals, which is what used to make a new file report a negative size.
+  assert.match(traced.stdout, /^3\. fileChange {2}NOTES\.md \(add \+8\), src\/stale\.js \(delete -2\)$/m);
+  assert.doesNotMatch(traced.stdout, /NOTES\.md \(add [^)]*-/);
 });
 
 test("output rejects a step outside the trace and --trace with --step", () => {
@@ -2562,7 +2669,8 @@ const EXPECTED_TOKEN_USAGE = {
   modelContextWindow: 272000
 };
 
-const EXPECTED_META_LINE = "Model: gpt-test (medium)  Tokens: 1280 total, 1200 in (300 cached), 80 out (40 reasoning)";
+// A task that names neither runs on the plugin's defaults, and reports what ran.
+const EXPECTED_META_LINE = "Model: gpt-6-astra (high)  Tokens: 1280 total, 1200 in (300 cached), 80 out (40 reasoning)";
 
 test("a finished task records the resolved model, effort, and its turn's token usage", () => {
   const repo = makeTempDir();
@@ -2578,25 +2686,25 @@ test("a finished task records the resolved model, effort, and its turn's token u
   const indexed = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
     (job) => job.jobClass === "task"
   );
-  assert.equal(indexed.model, "gpt-test");
-  assert.equal(indexed.effort, "medium");
+  assert.equal(indexed.model, "gpt-6-astra");
+  assert.equal(indexed.effort, "high");
   assert.deepEqual(indexed.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   const stored = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${indexed.id}.json`), "utf8"));
-  assert.equal(stored.model, "gpt-test");
-  assert.equal(stored.effort, "medium");
+  assert.equal(stored.model, "gpt-6-astra");
+  assert.equal(stored.effort, "high");
   assert.deepEqual(stored.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   const snapshot = JSON.parse(run("node", [SCRIPT, "output", indexed.id, "--json"], { cwd: repo, env }).stdout);
-  assert.equal(snapshot.job.model, "gpt-test");
+  assert.equal(snapshot.job.model, "gpt-6-astra");
   assert.deepEqual(snapshot.job.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   const statusPayload = JSON.parse(run("node", [SCRIPT, "status", indexed.id, "--json"], { cwd: repo, env }).stdout);
-  assert.equal(statusPayload.job.effort, "medium");
+  assert.equal(statusPayload.job.effort, "high");
   assert.deepEqual(statusPayload.job.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   const resultPayload = JSON.parse(run("node", [SCRIPT, "result", indexed.id, "--json"], { cwd: repo, env }).stdout);
-  assert.equal(resultPayload.job.model, "gpt-test");
+  assert.equal(resultPayload.job.model, "gpt-6-astra");
   assert.deepEqual(resultPayload.storedJob.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   endFixtureSession(repo, env);
@@ -2622,7 +2730,7 @@ test("a resumed job reports its own turn's tokens, not the thread's running tota
   const childJob = readIndex().find((job) => job.parentJobId === parentJob.id);
   // The fixture's thread-wide total is 2560 after the second turn; the job reports its delta.
   assert.deepEqual(childJob.tokenUsage, EXPECTED_TOKEN_USAGE);
-  assert.equal(childJob.model, "gpt-test");
+  assert.equal(childJob.model, "gpt-6-astra");
 
   endFixtureSession(repo, env);
 });
@@ -2871,6 +2979,31 @@ test("a background job fails visibly when the shared runtime dies mid-turn", asy
   endFixtureSession(repo, env);
 });
 
+test("a failed turn carries the reason out of its JSON error blob, never a bare brace", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "turn-error-json");
+  commitFixtureRepo(repo);
+  const env = buildEnv(binDir);
+
+  const result = run("node", [SCRIPT, "task", "raise the reasoning effort"], { cwd: repo, env });
+  assert.equal(result.status, 1, result.stdout);
+  endFixtureSession(repo, env);
+
+  const job = JSON.parse(fs.readFileSync(path.join(resolveStateDir(repo), "state.json"), "utf8")).jobs.find(
+    (candidate) => candidate.jobClass === "task"
+  );
+  const reason = "Reasoning effort 'minimal' is not supported by model gpt-5.6-sol.";
+  assert.equal(job.status, "failed");
+  // The server sent a pretty-printed blob whose first line is "{"; that is not a reason.
+  assert.equal(job.errorMessage, reason);
+  assert.equal(job.summary, reason);
+
+  const rendered = run("node", [SCRIPT, "output", job.id], { cwd: repo, env });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.ok(rendered.stdout.includes(reason), rendered.stdout);
+});
+
 test("session end only clears the session id it owns", () => {
   const repo = makeTempDir();
   commitFixtureRepo(repo);
@@ -3002,8 +3135,8 @@ test("stop hook logs running tasks to stderr without blocking when the review ga
   assert.equal(blocked.status, 0, blocked.stderr);
   assert.equal(blocked.stdout.trim(), "");
   assert.match(blocked.stderr, /Codex task task-live is still running/i);
-  assert.match(blocked.stderr, /\/codex:status/i);
-  assert.match(blocked.stderr, /\/codex:cancel task-live/i);
+  assert.match(blocked.stderr, /Read it with TaskOutput/i);
+  assert.match(blocked.stderr, /TaskStop task-live/i);
 });
 
 test("stop hook allows the stop when the review gate is enabled and the stop-time review task is clean", () => {

@@ -4,16 +4,16 @@
     "name": "Toby Marsden"
   },
   "metadata": {
-    "description": "Codex plugins to use in Claude Code for delegation and code review.",
-    "version": "1.6.0"
+    "description": "Drive Codex agents from Claude Code with the same verbs as native subagents.",
+    "version": "2.0.0"
   },
   "plugins": [
     {
       "name": "codex",
-      "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.6.0",
+      "description": "Use Codex agents from Claude Code as if they were native subagents: spawn, watch, steer, resume, stop.",
+      "version": "2.0.0",
       "author": {
-        "name": "OpenAI"
+        "name": "Toby Marsden"
       },
       "source": "./plugins/codex"
     }

@@ -79,8 +79,10 @@ const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const OUTPUT_JOB_POLL_INTERVAL_MS = 250;
 const OUTPUT_FINALIZE_POLL_INTERVAL_MS = 100;
 const OUTPUT_FINALIZE_WINDOW_MS = 5000;
-const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
+// What a task runs as when the caller names nothing. A caller who names either wins.
+const DEFAULT_MODEL = "gpt-6-astra";
+const DEFAULT_EFFORT = "high";
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
 function printUsage() {
@@ -90,7 +92,9 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh|--job <job-id>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh|--job <job-id>] [--model <model|spark>] [--effort <effort>] [prompt]",
+      `    without --model or --effort a task runs as ${DEFAULT_MODEL} at ${DEFAULT_EFFORT}.`,
+      "    --effort is passed through to Codex; the accepted values depend on the model.",
       "    --write gives Codex full access with no sandbox.",
       "  node scripts/codex-companion.mjs steer <job-id> [--prompt-file <path>] [--json] [text]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
@@ -127,20 +131,16 @@ function normalizeRequestedModel(model) {
   return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
 }
 
+/**
+ * Only the shape is ours. Which efforts a model accepts is the server's to say, and it
+ * differs per model, so a list held here would reject values that work and pass ones that
+ * do not.
+ */
 function normalizeReasoningEffort(effort) {
   if (effort == null) {
     return null;
   }
-  const normalized = String(effort).trim().toLowerCase();
-  if (!normalized) {
-    return null;
-  }
-  if (!VALID_REASONING_EFFORTS.has(normalized)) {
-    throw new Error(
-      `Unsupported reasoning effort "${effort}". Use one of: none, minimal, low, medium, high, xhigh.`
-    );
-  }
-  return normalized;
+  return String(effort).trim().toLowerCase() || null;
 }
 
 function normalizeArgv(argv) {
@@ -193,6 +193,33 @@ function firstMeaningfulLine(text, fallback) {
     .map((value) => value.trim())
     .find(Boolean);
   return line ?? fallback;
+}
+
+/**
+ * A failed turn's error arrives as whatever the server had to hand, often a pretty-printed
+ * JSON blob whose first line is a lone brace. "{" is not a reason, so read the message out
+ * of the blob, and failing that take the first line that carries words.
+ */
+function failureReason(text) {
+  const raw = String(text ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    const message = parsed?.error?.message ?? parsed?.message;
+    if (typeof message === "string" && message.trim()) {
+      return message.trim();
+    }
+  } catch {
+    // Not JSON, so there is no message field to prefer; the line scan below stands.
+  }
+  return (
+    raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line && !/^[[\]{},]+$/.test(line)) ?? raw
+  );
 }
 
 async function buildSetupReport(cwd, actionsTaken = []) {
@@ -557,11 +584,14 @@ async function executeTaskRun(request) {
   });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
-  const failureMessage = result.error?.message ?? result.stderr ?? "";
+  const failureText = result.error?.message ?? result.stderr ?? "";
+  // One reason, read once, for everything a caller sees: the result body, the summary, and
+  // the completion notification.
+  const errorMessage = result.status === 0 ? null : failureReason(failureText) || null;
   const rendered = renderTaskResult(
     {
       rawOutput,
-      failureMessage,
+      failureMessage: errorMessage ?? failureText,
       reasoningSummary: result.reasoningSummary
     },
     {
@@ -571,9 +601,11 @@ async function executeTaskRun(request) {
     }
   );
   const payload = {
+    // A turn that produced no message has no raw output, and saying so is what lets a
+    // reader of a failed job fall through to the rendered reason instead of an empty body.
+    rawOutput: rawOutput || null,
     status: result.status,
     threadId: result.threadId,
-    rawOutput,
     touchedFiles: result.touchedFiles,
     reasoningSummary: result.reasoningSummary
   };
@@ -587,7 +619,8 @@ async function executeTaskRun(request) {
     tokenUsage: result.tokenUsage,
     payload,
     rendered,
-    summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, `${taskMetadata.title} finished.`)),
+    errorMessage,
+    summary: firstMeaningfulLine(rawOutput, errorMessage ?? `${taskMetadata.title} finished.`),
     jobTitle: taskMetadata.title,
     jobClass: "task",
     write: Boolean(request.write)
@@ -619,7 +652,7 @@ function buildTaskRunMetadata({ prompt, resumeLast = false }) {
 }
 
 function renderQueuedTaskLaunch(payload) {
-  return `${payload.title} started in the background as ${payload.jobId}. Check /codex:status ${payload.jobId} for progress.\n`;
+  return `${payload.title} started in the background as ${payload.jobId}. Read it with TaskOutput ${payload.jobId}.\n`;
 }
 
 function getJobKindLabel(kind, jobClass) {
@@ -855,8 +888,8 @@ async function handleTask(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const model = normalizeRequestedModel(options.model);
-  const effort = normalizeReasoningEffort(options.effort);
+  const model = normalizeRequestedModel(options.model) ?? DEFAULT_MODEL;
+  const effort = normalizeReasoningEffort(options.effort) ?? DEFAULT_EFFORT;
   const prompt = readTaskPrompt(cwd, options, positionals);
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
