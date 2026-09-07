@@ -3,9 +3,31 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
+import { after } from "node:test";
+
+import { clearBrokerSession, loadBrokerSession, sendBrokerShutdown, teardownBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { terminateProcessTree } from "../plugins/codex/scripts/lib/process.mjs";
+
+const tempDirs = [];
+
+// Every temp workspace a test file creates may have started a shared broker (and its
+// codex app-server) that nothing else stops; shut them down when the file finishes.
+after(async () => {
+  for (const dir of tempDirs) {
+    const session = loadBrokerSession(dir);
+    if (!session) {
+      continue;
+    }
+    await sendBrokerShutdown(session.endpoint);
+    teardownBrokerSession({ ...session, killProcess: terminateProcessTree });
+    clearBrokerSession(dir);
+  }
+});
 
 export function makeTempDir(prefix = "codex-plugin-test-") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
 }
 
 export function writeExecutable(filePath, source) {

@@ -309,6 +309,9 @@ function createTurnCaptureState(threadId, options = {}) {
     resolveCompletion = resolve;
     rejectCompletion = reject;
   });
+  // The connection can die before `captureTurn` reaches its `await completion`, so keep
+  // the rejection handled; the awaiter still sees it.
+  completion.catch(() => {});
 
   return {
     threadId,
@@ -403,6 +406,24 @@ function completeTurn(state, turn = null, options = {}) {
   }
 
   state.resolveCompletion(state);
+}
+
+function failTurn(state, error) {
+  if (state.completed) {
+    return;
+  }
+
+  clearCompletionTimer(state);
+  state.completed = true;
+  state.rejectCompletion(error);
+}
+
+function connectionLostError(state, client) {
+  const detail = client.exitError?.message ? ` ${client.exitError.message}` : "";
+  return Object.assign(
+    new Error(`Lost the codex app-server connection while thread ${state.threadId} was running.${detail}`),
+    { code: "CODEX_CONNECTION_LOST" }
+  );
 }
 
 function scheduleInferredCompletion(state) {
@@ -619,6 +640,10 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
     }
 
     applyTurnNotification(state, message);
+  });
+
+  client.exitPromise.then(() => {
+    failTurn(state, connectionLostError(state, client));
   });
 
   try {

@@ -13,7 +13,7 @@ import {
   sendBrokerShutdown,
   teardownBrokerSession
 } from "./lib/broker-lifecycle.mjs";
-import { clearSessionId, loadState, resolveStateFile, saveSessionId, saveState } from "./lib/state.mjs";
+import { clearSessionId, loadSessionId, loadState, resolveStateFile, saveSessionId, saveState } from "./lib/state.mjs";
 import { TRANSCRIPT_PATH_ENV } from "./lib/claude-session-transfer.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
@@ -74,6 +74,23 @@ function cleanupSessionJobs(cwd, sessionId) {
   });
 }
 
+/**
+ * The broker is shared by every Claude session in the workspace, so an ending session may
+ * only tear it down when no other session still has work on it. A job with no recorded
+ * session id belongs to someone else.
+ */
+function hasActiveJobsFromOtherSessions(cwd, sessionId) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  if (!fs.existsSync(resolveStateFile(workspaceRoot))) {
+    return false;
+  }
+
+  const owner = sessionId ?? null;
+  return loadState(workspaceRoot).jobs.some(
+    (job) => (job.status === "queued" || job.status === "running") && (job.sessionId ?? null) !== owner
+  );
+}
+
 function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
   appendEnvVar(TRANSCRIPT_PATH_ENV, input.transcript_path);
@@ -85,6 +102,7 @@ function handleSessionStart(input) {
 
 async function handleSessionEnd(input) {
   const cwd = input.cwd || process.cwd();
+  const sessionId = input.session_id || process.env[SESSION_ID_ENV];
   const brokerSession =
     loadBrokerSession(cwd) ??
     (process.env[BROKER_ENDPOINT_ENV]
@@ -100,12 +118,23 @@ async function handleSessionEnd(input) {
   const sessionDir = brokerSession?.sessionDir ?? null;
   const pid = brokerSession?.pid ?? null;
 
-  if (brokerEndpoint) {
+  const sharedWithOtherSessions = hasActiveJobsFromOtherSessions(cwd, sessionId);
+
+  if (brokerEndpoint && !sharedWithOtherSessions) {
     await sendBrokerShutdown(brokerEndpoint);
   }
 
-  cleanupSessionJobs(cwd, input.session_id || process.env[SESSION_ID_ENV]);
-  clearSessionId(cwd);
+  cleanupSessionJobs(cwd, sessionId);
+  const storedSessionId = loadSessionId(cwd);
+  if (storedSessionId && storedSessionId === sessionId) {
+    clearSessionId(cwd);
+  }
+
+  if (sharedWithOtherSessions) {
+    process.stderr.write("[codex] Leaving the shared app-server broker running: another session still has active jobs.\n");
+    return;
+  }
+
   teardownBrokerSession({
     endpoint: brokerEndpoint,
     pidFile,

@@ -86,14 +86,14 @@ async function waitFor(predicate, { timeoutMs = 15000, intervalMs = 100 } = {}) 
   throw new Error("Timed out waiting for condition.");
 }
 
-function endSession(repo, binDir) {
+function endSession(repo, binDir, sessionId = null) {
   const env = buildEnv(binDir);
   delete env.CLAUDE_PLUGIN_DATA;
   delete env.CODEX_COMPANION_SESSION_ID;
   return run("node", [SESSION_HOOK, "SessionEnd"], {
     cwd: repo,
     env,
-    input: JSON.stringify({ hook_event_name: "SessionEnd", cwd: repo })
+    input: JSON.stringify({ hook_event_name: "SessionEnd", cwd: repo, ...(sessionId ? { session_id: sessionId } : {}) })
   });
 }
 
@@ -210,7 +210,7 @@ test("agents MCP tools drive a Codex job from launch through steer, resume, list
     await server.close();
   }
 
-  const cleanup = endSession(repo, binDir);
+  const cleanup = endSession(repo, binDir, "session-mcp-test");
   assert.equal(cleanup.status, 0, cleanup.stderr);
   assert.equal(fs.existsSync(resolveSessionFile(repo)), false);
 });

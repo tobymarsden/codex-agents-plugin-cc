@@ -99,12 +99,30 @@ export function clearBrokerSession(cwd) {
   }
 }
 
-async function isBrokerEndpointReady(endpoint) {
-  if (!endpoint) {
+function isProcessAlive(pid) {
+  if (!Number.isFinite(pid)) {
     return false;
   }
   try {
-    return await waitForBrokerEndpoint(endpoint, 150);
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+/**
+ * A broker whose process is still alive may be busy serving running jobs, so it gets the
+ * same readiness budget as a fresh start; only a broker with no live process is probed
+ * fast. Replacing a slow-but-live broker strands every job already running on it.
+ */
+export async function isExistingBrokerAlive(existing, options = {}) {
+  if (!existing?.endpoint) {
+    return false;
+  }
+  const timeoutMs = isProcessAlive(existing.pid) ? options.timeoutMs ?? 2000 : 150;
+  try {
+    return await waitForBrokerEndpoint(existing.endpoint, timeoutMs);
   } catch {
     return false;
   }
@@ -112,7 +130,7 @@ async function isBrokerEndpointReady(endpoint) {
 
 export async function ensureBrokerSession(cwd, options = {}) {
   const existing = loadBrokerSession(cwd);
-  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
+  if (existing && (await isExistingBrokerAlive(existing, options))) {
     return existing;
   }
 

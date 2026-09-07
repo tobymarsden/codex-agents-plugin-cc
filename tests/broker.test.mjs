@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -6,7 +7,7 @@ import assert from "node:assert/strict";
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
 import { CodexAppServerClient } from "../plugins/codex/scripts/lib/app-server.mjs";
-import { ensureBrokerSession, sendBrokerShutdown } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { ensureBrokerSession, isExistingBrokerAlive, sendBrokerShutdown } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
 
 async function waitFor(predicate, { timeoutMs = 15000, intervalMs = 50 } = {}) {
   const start = Date.now();
@@ -170,5 +171,24 @@ test("broker forwards turn/start on an active thread instead of refusing it", as
       await client.close().catch(() => {});
     }
     await sendBrokerShutdown(session.endpoint);
+  }
+});
+
+test("a live broker that is slow to accept is kept instead of replaced", async () => {
+  const sessionDir = makeTempDir();
+  const socketPath = path.join(sessionDir, "broker.sock");
+  const existing = { endpoint: `unix:${socketPath}`, pid: process.pid };
+
+  const server = net.createServer(() => {});
+  const listening = new Promise((resolve) => {
+    setTimeout(() => server.listen(socketPath, resolve), 500);
+  });
+
+  try {
+    assert.equal(await isExistingBrokerAlive({ ...existing, pid: null }), false);
+    assert.equal(await isExistingBrokerAlive(existing, { timeoutMs: 3000 }), true);
+  } finally {
+    await listening;
+    await new Promise((resolve) => server.close(resolve));
   }
 });

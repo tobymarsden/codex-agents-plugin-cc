@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
 import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
-import { loadBrokerSession, saveBrokerSession } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
-import { resolveSessionFile, resolveStateDir, saveSessionId } from "../plugins/codex/scripts/lib/state.mjs";
+import { loadBrokerSession, saveBrokerSession, sendBrokerShutdown } from "../plugins/codex/scripts/lib/broker-lifecycle.mjs";
+import { loadSessionId, resolveSessionFile, resolveStateDir, saveSessionId } from "../plugins/codex/scripts/lib/state.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN_ROOT = path.join(ROOT, "plugins", "codex");
@@ -2422,6 +2422,83 @@ test("session end fully cleans up jobs for the ending session", async (t) => {
   assert.deepEqual(state.jobs.map((job) => job.id), ["review-other"]);
   const otherJob = state.jobs[0];
   assert.equal(otherJob.logFile, otherSessionLog);
+});
+
+test("session end leaves another session's running job and the shared broker alone", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const jobEnv = { ...buildEnv(binDir), CODEX_COMPANION_SESSION_ID: "sess-job" };
+  const runningJob = await launchRunningBackgroundTask(repo, jobEnv);
+
+  const cleanup = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env: buildEnv(binDir),
+    input: JSON.stringify({ hook_event_name: "SessionEnd", session_id: "sess-other", cwd: repo })
+  });
+  assert.equal(cleanup.status, 0, cleanup.stderr);
+  assert.match(cleanup.stderr, /another session still has active jobs/);
+  assert.ok(loadBrokerSession(repo), "the shared broker session file was deleted by a foreign session end");
+
+  const waited = run(
+    "node",
+    [SCRIPT, "status", runningJob.id, "--wait", "--timeout-ms", "20000", "--json"],
+    { cwd: repo, env: jobEnv }
+  );
+  assert.equal(waited.status, 0, waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).job.status, "completed");
+
+  endFixtureSession(repo, jobEnv);
+});
+
+test("a background job fails visibly when the shared runtime dies mid-turn", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const runningJob = await launchRunningBackgroundTask(repo, env);
+
+  const session = loadBrokerSession(repo);
+  assert.ok(session?.endpoint, "expected the background job to run through the shared broker");
+  await sendBrokerShutdown(session.endpoint);
+
+  const waited = run(
+    "node",
+    [SCRIPT, "status", runningJob.id, "--wait", "--timeout-ms", "15000", "--json"],
+    { cwd: repo, env }
+  );
+  assert.equal(waited.status, 0, waited.stderr);
+  const job = JSON.parse(waited.stdout).job;
+  assert.equal(job.status, "failed");
+  assert.match(job.errorMessage, /connection/i);
+
+  endFixtureSession(repo, env);
+});
+
+test("session end only clears the session id it owns", () => {
+  const repo = makeTempDir();
+  commitFixtureRepo(repo);
+  saveSessionId(repo, "sess-a");
+
+  const foreign = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env: process.env,
+    input: JSON.stringify({ hook_event_name: "SessionEnd", session_id: "sess-b", cwd: repo })
+  });
+  assert.equal(foreign.status, 0, foreign.stderr);
+  assert.equal(loadSessionId(repo), "sess-a");
+
+  const own = run("node", [SESSION_HOOK, "SessionEnd"], {
+    cwd: repo,
+    env: process.env,
+    input: JSON.stringify({ hook_event_name: "SessionEnd", session_id: "sess-a", cwd: repo })
+  });
+  assert.equal(own.status, 0, own.stderr);
+  assert.equal(fs.existsSync(resolveSessionFile(repo)), false);
 });
 
 test("stop hook runs a stop-time review task and blocks on findings when the review gate is enabled", () => {
