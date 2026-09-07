@@ -2015,6 +2015,144 @@ test("steer refuses jobs that are not running a Codex turn", () => {
   assert.doesNotMatch(refusedQueued.stderr, /task --job/);
 });
 
+function runFinishedFixtureTask(repo, env) {
+  const finished = run("node", [SCRIPT, "task", "summarize the retry policy"], { cwd: repo, env });
+  assert.equal(finished.status, 0, finished.stderr);
+  const statePath = path.join(resolveStateDir(repo), "state.json");
+  return JSON.parse(fs.readFileSync(statePath, "utf8")).jobs.find((job) => job.jobClass === "task");
+}
+
+test("output peeks at a running job without blocking", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const runningJob = await launchRunningBackgroundTask(repo, env);
+
+  const peeked = run("node", [SCRIPT, "output", runningJob.id, "--json"], { cwd: repo, env });
+  assert.equal(peeked.status, 0, peeked.stderr);
+  const snapshot = JSON.parse(peeked.stdout);
+  assert.equal(snapshot.job.status, "running");
+  assert.equal(snapshot.thread.status.type, "active");
+  assert.equal(snapshot.thread.canAcceptDirectInput, true);
+  assert.ok(snapshot.log.some((line) => /Turn started/.test(line)), snapshot.log.join("\n"));
+  assert.equal(snapshot.result, null);
+
+  const cancelled = run("node", [SCRIPT, "cancel", runningJob.id, "--json"], { cwd: repo, env });
+  assert.equal(cancelled.status, 0, cancelled.stderr);
+  endFixtureSession(repo, env);
+});
+
+test("output --wait returns when the broker reports the turn completed", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const runningJob = await launchRunningBackgroundTask(repo, env);
+  assert.ok(loadBrokerSession(repo), "expected the fixture job to run against a shared broker");
+
+  const startedAt = Date.now();
+  const waited = run("node", [SCRIPT, "output", runningJob.id, "--wait", "15000", "--json"], { cwd: repo, env });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(waited.status, 0, waited.stderr);
+  const snapshot = JSON.parse(waited.stdout);
+  assert.equal(snapshot.waitTimedOut, false);
+  assert.equal(snapshot.job.status, "completed");
+  assert.match(snapshot.result, /Handled the requested task/);
+  assert.equal(snapshot.thread.status.type, "idle");
+  assert.ok(elapsedMs < 10000, `output --wait took ${elapsedMs} ms`);
+
+  endFixtureSession(repo, env);
+});
+
+test("output --wait reports a timeout as data while the job keeps running", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const runningJob = await launchRunningBackgroundTask(repo, env);
+
+  const waited = run("node", [SCRIPT, "output", runningJob.id, "--wait", "1000", "--json"], { cwd: repo, env });
+  assert.equal(waited.status, 0, waited.stderr);
+  const snapshot = JSON.parse(waited.stdout);
+  assert.equal(snapshot.waitTimedOut, true);
+  assert.equal(snapshot.job.status, "running");
+
+  const cancelled = run("node", [SCRIPT, "cancel", runningJob.id, "--json"], { cwd: repo, env });
+  assert.equal(cancelled.status, 0, cancelled.stderr);
+  endFixtureSession(repo, env);
+});
+
+test("output --wait waits through the queued phase of a background job", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "slow-task");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const launched = run("node", [SCRIPT, "task", "--background", "--json", "summarize the retry policy"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(launched.status, 0, launched.stderr);
+  const jobId = JSON.parse(launched.stdout).jobId;
+
+  const waited = run("node", [SCRIPT, "output", jobId, "--wait", "15000", "--json"], { cwd: repo, env });
+  assert.equal(waited.status, 0, waited.stderr);
+  const snapshot = JSON.parse(waited.stdout);
+  assert.equal(snapshot.waitTimedOut, false);
+  assert.equal(snapshot.job.status, "completed");
+  assert.match(snapshot.result, /Handled the requested task/);
+
+  endFixtureSession(repo, env);
+});
+
+test("output reads a finished job after the shared runtime is gone", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const finishedJob = runFinishedFixtureTask(repo, env);
+  endFixtureSession(repo, env);
+  assert.equal(loadBrokerSession(repo), null);
+
+  const peeked = run("node", [SCRIPT, "output", finishedJob.id, "--json"], { cwd: repo, env });
+  assert.equal(peeked.status, 0, peeked.stderr);
+  const snapshot = JSON.parse(peeked.stdout);
+  assert.equal(snapshot.thread, null);
+  assert.match(snapshot.result, /Handled the requested task/);
+  assert.ok(snapshot.log.length > 0);
+
+  const tailed = run("node", [SCRIPT, "output", finishedJob.id, "--tail", "2", "--json"], { cwd: repo, env });
+  assert.equal(tailed.status, 0, tailed.stderr);
+  assert.equal(JSON.parse(tailed.stdout).log.length, 2);
+});
+
+test("output renders a finished job as text", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir);
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const finishedJob = runFinishedFixtureTask(repo, env);
+  endFixtureSession(repo, env);
+
+  const rendered = run("node", [SCRIPT, "output", finishedJob.id], { cwd: repo, env });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.ok(rendered.stdout.startsWith(`Job ${finishedJob.id}: completed`), rendered.stdout);
+  assert.match(rendered.stdout, /Handled the requested task/);
+});
+
 test("session end fully cleans up jobs for the ending session", async (t) => {
   const repo = makeTempDir();
   initGitRepo(repo);

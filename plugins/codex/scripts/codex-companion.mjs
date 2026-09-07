@@ -20,7 +20,8 @@ import {
     readOutputSchema,
     runAppServerReview,
     runAppServerTurn,
-    steerAppServerTurn
+    steerAppServerTurn,
+    waitForAppServerTurnCompletion
   } from "./lib/codex.mjs";
 import { loadBrokerSession } from "./lib/broker-lifecycle.mjs";
 import { resolveClaudeSessionPath } from "./lib/claude-session-transfer.mjs";
@@ -37,6 +38,7 @@ import {
   writeJobFile
 } from "./lib/state.mjs";
 import {
+  buildOutputSnapshot,
   buildSingleJobSnapshot,
   buildStatusSnapshot,
   readStoredJob,
@@ -61,6 +63,7 @@ import {
   renderReviewResult,
   renderStoredJobResult,
   renderCancelReport,
+  renderJobOutput,
   renderJobStatusReport,
   renderSetupReport,
   renderStatusReport,
@@ -71,6 +74,9 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
+const OUTPUT_JOB_POLL_INTERVAL_MS = 250;
+const OUTPUT_FINALIZE_POLL_INTERVAL_MS = 100;
+const OUTPUT_FINALIZE_WINDOW_MS = 5000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
@@ -86,6 +92,7 @@ function printUsage() {
       "    --write gives Codex full access with no sandbox.",
       "  node scripts/codex-companion.mjs steer <job-id> [--prompt-file <path>] [--json] [text]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
+      "  node scripts/codex-companion.mjs output <job-id> [--wait <ms>] [--tail <n>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -336,6 +343,44 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
     waitTimedOut: isActiveJobStatus(snapshot.job.status),
     timeoutMs
   };
+}
+
+function readTrackedJob(cwd, reference) {
+  return buildSingleJobSnapshot(cwd, reference).job;
+}
+
+async function pollJobUntilFinal(cwd, reference, { until, pollIntervalMs }) {
+  let job = readTrackedJob(cwd, reference);
+  while (isActiveJobStatus(job.status) && Date.now() < until) {
+    await sleep(Math.min(pollIntervalMs, Math.max(0, until - Date.now())));
+    job = readTrackedJob(cwd, reference);
+  }
+  return job;
+}
+
+async function waitForJobCompletion(cwd, reference, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let job = readTrackedJob(cwd, reference);
+
+  while (isActiveJobStatus(job.status) && !job.turnId && Date.now() < deadline) {
+    await sleep(Math.min(OUTPUT_JOB_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
+    job = readTrackedJob(cwd, reference);
+  }
+
+  if (isActiveJobStatus(job.status) && job.turnId && loadBrokerSession(resolveWorkspaceRoot(cwd))) {
+    await waitForAppServerTurnCompletion(cwd, {
+      threadId: job.threadId,
+      timeoutMs: Math.max(0, deadline - Date.now())
+    });
+    job = await pollJobUntilFinal(cwd, reference, {
+      until: Math.min(deadline, Date.now() + OUTPUT_FINALIZE_WINDOW_MS),
+      pollIntervalMs: OUTPUT_FINALIZE_POLL_INTERVAL_MS
+    });
+  }
+
+  if (isActiveJobStatus(job.status)) {
+    await pollJobUntilFinal(cwd, reference, { until: deadline, pollIntervalMs: OUTPUT_JOB_POLL_INTERVAL_MS });
+  }
 }
 
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
@@ -979,6 +1024,45 @@ async function handleStatus(argv) {
   outputResult(renderStatusPayload(report, options.json), options.json);
 }
 
+function parseNumericOption(value, flag) {
+  if (value === undefined) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${flag} requires a non-negative number.`);
+  }
+  return parsed;
+}
+
+async function handleOutput(argv) {
+  const { options, positionals } = parseCommandInput(argv, {
+    valueOptions: ["cwd", "wait", "tail"],
+    booleanOptions: ["json"]
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const reference = positionals[0] ?? "";
+  if (!reference) {
+    throw new Error("Provide a job id to read output for.");
+  }
+
+  const tail = parseNumericOption(options.tail, "--tail");
+  const waitTimeoutMs = parseNumericOption(options.wait, "--wait");
+
+  if (waitTimeoutMs !== null) {
+    await waitForJobCompletion(cwd, reference, waitTimeoutMs);
+  }
+
+  const snapshot = await buildOutputSnapshot(cwd, reference, { tail });
+  const payload =
+    waitTimeoutMs === null
+      ? snapshot
+      : { ...snapshot, waitTimedOut: isActiveJobStatus(snapshot.job.status) };
+
+  outputCommandResult(payload, renderJobOutput(payload, waitTimeoutMs), options.json);
+}
+
 function handleResult(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -1123,6 +1207,9 @@ async function main() {
       break;
     case "task-worker":
       await handleTaskWorker(argv);
+      break;
+    case "output":
+      await handleOutput(argv);
       break;
     case "status":
       await handleStatus(argv);

@@ -1,12 +1,14 @@
 import fs from "node:fs";
 
-import { getSessionRuntimeStatus } from "./codex.mjs";
+import { loadBrokerSession } from "./broker-lifecycle.mjs";
+import { getSessionRuntimeStatus, readAppServerThread } from "./codex.mjs";
 import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
 import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
+export const DEFAULT_OUTPUT_TAIL_LINES = 40;
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
@@ -256,6 +258,60 @@ export function buildSingleJobSnapshot(cwd, reference, options = {}) {
   return {
     workspaceRoot,
     job: enrichJob(selected, { maxProgressLines: options.maxProgressLines })
+  };
+}
+
+function isFinalJobStatus(status) {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function readJobLogTail(logFile, maxLines) {
+  if (!logFile || !fs.existsSync(logFile)) {
+    return [];
+  }
+
+  const lines = fs.readFileSync(logFile, "utf8").split(/\r?\n/);
+  while (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines.slice(-maxLines);
+}
+
+function readJobResultText(storedJob) {
+  if (typeof storedJob?.result?.rawOutput === "string") {
+    return storedJob.result.rawOutput;
+  }
+  if (typeof storedJob?.rendered === "string") {
+    return storedJob.rendered;
+  }
+  return storedJob?.errorMessage ?? null;
+}
+
+export async function buildOutputSnapshot(cwd, reference, options = {}) {
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
+  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot));
+  const selected = matchJobReference(jobs, reference);
+  if (!selected) {
+    throw new Error(`No job found for "${reference}". Run /codex:status to inspect known jobs.`);
+  }
+
+  const job = enrichJob(selected);
+  const storedJob = readStoredJob(workspaceRoot, job.id);
+  const threadId = storedJob?.threadId ?? job.threadId ?? null;
+  const runtimeThread =
+    threadId && loadBrokerSession(workspaceRoot) ? await readAppServerThread(workspaceRoot, threadId) : null;
+
+  return {
+    workspaceRoot,
+    job,
+    log: readJobLogTail(job.logFile, options.tail ?? DEFAULT_OUTPUT_TAIL_LINES),
+    result: isFinalJobStatus(job.status) ? readJobResultText(storedJob) : null,
+    thread: runtimeThread
+      ? {
+          status: runtimeThread.status,
+          canAcceptDirectInput: runtimeThread.canAcceptDirectInput ?? null
+        }
+      : null
   };
 }
 

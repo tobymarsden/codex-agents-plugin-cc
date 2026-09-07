@@ -1020,6 +1020,40 @@ export async function steerAppServerTurn(cwd, { threadId, turnId, text }) {
   }
 }
 
+export async function readAppServerThread(cwd, threadId) {
+  const client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
+  try {
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: false });
+    return thread;
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+export async function waitForAppServerTurnCompletion(cwd, { threadId, timeoutMs }) {
+  const client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
+  let timer = null;
+  try {
+    const completion = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ completed: false }), timeoutMs);
+      client.setNotificationHandler((message) => {
+        if (message.method === "turn/completed" && message.params.threadId === threadId) {
+          resolve({ completed: true, turn: message.params.turn });
+        }
+      });
+    });
+    await client.request("broker/subscribe", { threadId });
+    const { thread } = await client.request("thread/read", { threadId, includeTurns: false });
+    if (thread.status?.type !== "active") {
+      return { completed: true, turn: null };
+    }
+    return await completion;
+  } finally {
+    clearTimeout(timer);
+    await client.close().catch(() => {});
+  }
+}
+
 export async function runAppServerReview(cwd, options = {}) {
   const availability = getCodexAvailability(cwd);
   if (!availability.available) {

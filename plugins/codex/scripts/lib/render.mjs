@@ -387,6 +387,29 @@ export function renderJobStatusReport(job) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+export function renderJobOutput(snapshot, waitTimeoutMs = null) {
+  const job = snapshot.job;
+  const timing = job.status === "queued" || job.status === "running" ? job.elapsed : job.duration;
+  const lines = [`Job ${job.id}: ${job.status} (${job.phase}${timing ? `, ${timing}` : ""})`];
+
+  if (snapshot.thread) {
+    const acceptsInput = snapshot.thread.canAcceptDirectInput ? ", accepts input" : "";
+    lines.push(`Thread: ${snapshot.thread.status?.type ?? "unknown"}${acceptsInput}`);
+  }
+
+  lines.push(...snapshot.log);
+
+  if (snapshot.result != null) {
+    lines.push("", String(snapshot.result).trimEnd());
+  }
+
+  if (snapshot.waitTimedOut) {
+    lines.push(`Wait timed out after ${waitTimeoutMs} ms; the job is still ${job.status}.`);
+  }
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
 export function renderStoredJobResult(job, storedJob) {
   const threadId = storedJob?.threadId ?? job.threadId ?? null;
   const resumeCommand = threadId ? `codex resume ${threadId}` : null;
