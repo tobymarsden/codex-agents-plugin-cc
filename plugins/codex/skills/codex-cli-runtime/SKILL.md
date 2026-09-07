@@ -50,3 +50,6 @@ Codex runs shell commands in its own login shell (`zsh -lc`). Its `PATH` and too
 - Strip routing flags (`--background`, `--wait`, `--resume`, `--fresh`, and `--job`) from the prompt and translate them to the corresponding CLI controls.
 - Add `--write` by default unless the user asks for read-only work; leave model and effort unset unless requested.
 - Preserve the remaining task text, return stdout verbatim, and never inspect the repository or perform follow-up work.
+- Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`; `task` and `steer` are the only entry points.
+- `--effort` accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+- If the Bash call fails or Codex cannot be invoked, return nothing.
