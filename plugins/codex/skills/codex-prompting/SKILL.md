@@ -1,12 +1,12 @@
 ---
-name: gpt-5-4-prompting
-description: Internal guidance for composing Codex and GPT-5.4 prompts for coding, review, diagnosis, and research tasks inside the Codex Claude Code plugin
+name: codex-prompting
+description: Guidance for composing briefs for Codex tasks and reviews from Claude Code, whether through the agents MCP tools or /codex:rescue
 user-invocable: false
 ---
 
-# GPT-5.4 Prompting
+# Codex prompting
 
-Use this skill when `codex:codex-rescue` needs to ask Codex or another GPT-5.4-based workflow for help.
+This skill applies to any prompt handed to Codex: the `Agent` tool's `prompt`, `SendMessage`'s `message`, and `/codex:rescue`.
 
 Prompt Codex like an operator, not a collaborator. Keep prompts compact and block-structured with XML tags. State the task, the output contract, the follow-through defaults, and the small set of extra constraints that matter.
 
@@ -33,7 +33,16 @@ When to add blocks:
 How to choose prompt shape:
 - Use built-in `review` or `adversarial-review` commands when the job is reviewing local git changes. Those prompts already carry the review contract.
 - Use `task` when the task is diagnosis, planning, research, or implementation and you need to control the prompt more directly.
-- Use `task --resume-last` for follow-up instructions on the same Codex thread. Send only the delta instruction instead of restating the whole prompt unless the direction changed materially.
+- Use `SendMessage` (or CLI `steer`) for a delta instruction to a running job, and `SendMessage` to a finished job (or `task --job <id>`) to continue its thread; send only the delta.
+
+## Brief as a file
+
+- For a long brief, write it to a file.
+- Put any binding policy text, such as a coding charter or house style, in that file.
+- Point Codex at the file's path from the prompt.
+- Instruct Codex to read the file whole before acting.
+- Keep the prompt itself to the file pointer and the output contract.
+- This worked in practice: Codex read a 40 KB brief in chunks and cited its rules back.
 
 Working rules:
 - Prefer explicit prompt contracts over vague nudges.

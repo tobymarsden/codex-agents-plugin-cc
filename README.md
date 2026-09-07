@@ -9,10 +9,10 @@ they already have.
 
 ## What You Get
 
+- `Agent`, `SendMessage`, `TaskOutput`, `TaskStop`, and `ListAgents` MCP tools let a Claude session drive Codex like a subagent
 - `/codex:review` for a normal read-only Codex review
 - `/codex:adversarial-review` for a steerable challenge review
 - `/codex:rescue`, `/codex:transfer`, `/codex:status`, `/codex:result`, and `/codex:cancel` to delegate work, hand off sessions, and manage background jobs
-- `Agent`, `SendMessage`, `TaskOutput`, `TaskStop`, and `ListAgents` MCP tools that drive Codex jobs with the same verbs as the native subagent tools
 
 ## Requirements
 
@@ -126,6 +126,8 @@ This command is read-only. It does not fix code.
 
 ### `/codex:rescue`
 
+For direct control from a Claude session, use the `agents` MCP tools below; `/codex:rescue` is the slash-command route.
+
 Hands a task to Codex through the `codex:codex-rescue` subagent.
 
 Use it when you want Codex to:
@@ -147,7 +149,7 @@ Examples:
 /codex:rescue fix the failing test with the smallest safe patch
 /codex:rescue --resume apply the top fix from the last run
 /codex:rescue --job task-abc123 apply the top fix
-/codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
+/codex:rescue --model gpt-5.5 --effort medium investigate the flaky integration test
 /codex:rescue --model spark fix the issue quickly
 /codex:rescue --background investigate the regression
 ```
@@ -161,29 +163,40 @@ Ask Codex to redesign the database connection to be more resilient.
 **Notes:**
 
 - if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
-- if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
+- `spark` maps to the current Codex Spark model (the alias lives in `MODEL_ALIASES` in `codex-companion.mjs`)
 - follow-up rescue requests can continue the latest Codex task in the repo
 - rescue runs add `--write` by default unless you ask for read-only work, and `--write` gives Codex full access with no sandbox
 
 ### Codex as a subagent: the `agents` MCP tools
 
-The plugin registers an MCP server named `agents`, so Claude Code sees `mcp__plugin_codex_agents__Agent`, `mcp__plugin_codex_agents__SendMessage`, `mcp__plugin_codex_agents__TaskOutput`, `mcp__plugin_codex_agents__TaskStop`, and `mcp__plugin_codex_agents__ListAgents`: the same verbs as the native subagent tools, one namespace over. Each one is a job id away from the slash commands above.
+The plugin registers an MCP server named `agents`, so Claude Code sees `mcp__plugin_codex_agents__Agent`, `mcp__plugin_codex_agents__SendMessage`, `mcp__plugin_codex_agents__TaskOutput`, `mcp__plugin_codex_agents__TaskStop`, and `mcp__plugin_codex_agents__ListAgents`: the same verbs as the native subagent tools, one namespace over. Each one is a job id away from the slash commands above. Every tool accepts optional `cwd`; pass it on every call when work belongs to a specific workspace so the job and later lookups stay in that workspace.
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `Agent` | `prompt`, `run_in_background`, `write`, `model`, `effort`, `resume` | Runs a Codex task. With `run_in_background` it returns a job id instead of the result; `resume` takes a job id whose Codex thread the task continues |
-| `SendMessage` | `to`, `message`, `summary` | Delivers a message to the job named by `to` |
-| `TaskOutput` | `task_id`, `block`, `timeout` | Reads a job's output |
-| `TaskStop` | `task_id` | Cancels a running job |
-| `ListAgents` | none | Lists this session's jobs with status, phase, elapsed time, and whether each accepts input |
+| `Agent` | `prompt`, `run_in_background`, `write`, `model`, `effort`, `resume`, `cwd` | Runs a Codex task. With `run_in_background` it returns a job id instead of the result; `resume` takes a job id whose Codex thread the task continues |
+| `SendMessage` | `to`, `message`, `summary`, `cwd` | Delivers a message to the job named by `to` |
+| `TaskOutput` | `task_id`, `block`, `timeout`, `cwd` | Reads a job's output |
+| `TaskStop` | `task_id`, `cwd` | Cancels a running job |
+| `ListAgents` | `cwd` | Lists this session's jobs with status, phase, elapsed time, and whether each accepts input |
 
 `SendMessage` branches on the job. On a running job it steers the current turn mid-flight: the text joins the turn already in progress, and Codex sees it at its next step. On a finished job it resumes the same Codex thread as a new job, linked to the old one by `parentJobId`, and returns the new job id so the thread's context carries over.
 
 `TaskOutput` with `block` waits for the job to finish or for `timeout` to elapse; otherwise it returns the job's current state, a tail of its log, and the live thread status.
 
+Every finished job includes `Model: <model> (<effort>)  Tokens: <total> total, <in> in (<cached> cached), <out> out (<reasoning> reasoning)` in `TaskOutput`; the token figure covers that job's turn, not the whole thread. `ListAgents` appends the model and `<n>tok`.
+
 Jobs are scoped to the Claude session, so `ListAgents` and the job ids you get back cover the work this session started.
 
-An MCP tool cannot push into the session, so a background job finishing is not announced on its own. To be notified, run the blocking `TaskOutput`, or the equivalent `output <job-id> --wait <ms>` command, under a background `Bash` call.
+For a background job, `Agent` prints:
+
+```text
+Started Codex job <id>. Read it with TaskOutput. To be woken when it finishes instead of polling, run this under a background Bash call:
+node "<absolute path>/codex-companion.mjs" output <id> --wait 3600000 [--cwd <dir>]
+```
+
+Run that command under a background `Bash` call to receive a completion notification; an MCP tool cannot push into the session.
+
+Codex runs shell commands in its own login shell (`zsh -lc`), so its `PATH` and tool versions can differ from the Claude session's. Pin or measure a required tool version inside the workspace.
 
 ### `/codex:transfer`
 
@@ -305,10 +318,10 @@ The Codex plugin wraps the [Codex app server](https://developers.openai.com/code
 
 ### Common Configurations
 
-If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you started Claude in:
+If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example, to set a model and `high` effort for a specific project, add the following to a `.codex/config.toml` file at the root of the directory you started Claude in:
 
 ```toml
-model = "gpt-5.4-mini"
+model = "<model-slug>"
 model_reasoning_effort = "high"
 ```
 

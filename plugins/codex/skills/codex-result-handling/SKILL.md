@@ -12,6 +12,7 @@ When the helper returns Codex output:
 - Use the file paths and line numbers exactly as the helper reports them.
 - Preserve evidence boundaries. If Codex marked something as an inference, uncertainty, or follow-up question, keep that distinction.
 - Preserve output sections when the prompt asked for them, such as observed facts, inferences, open questions, touched files, or next steps.
+- The same rules apply to text returned by `TaskOutput` and by the `output` and `result` subcommands; when relaying a result, keep its `Model:`/`Tokens:` line so the reader knows what ran and what it cost.
 - If there are no findings, say that explicitly and keep the residual-risk note brief.
 - If Codex made edits, say so explicitly and list the touched files when the helper provides them.
 - For `codex:codex-rescue`, do not turn a failed or incomplete Codex run into a Claude-side implementation attempt. Report the failure and stop.

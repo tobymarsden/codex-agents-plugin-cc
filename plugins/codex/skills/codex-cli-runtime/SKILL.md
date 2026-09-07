@@ -1,47 +1,52 @@
 ---
 name: codex-cli-runtime
-description: Internal helper contract for calling the codex-companion runtime from Claude Code
+description: "How Claude Code drives Codex: the agents MCP tools for the main thread, the codex-companion CLI underneath, and the forwarding rules for the rescue wrapper"
 user-invocable: false
 ---
 
-# Codex Runtime
+# Codex runtime
 
-Use this skill only inside the `codex:codex-rescue` subagent.
+## The agents MCP tools
 
-Primary helper:
-- `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task "<raw arguments>"`
-- `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" steer <job-id> "<text>"` for a job that is already running
+The `agents` MCP server is the primary way for a Claude main thread to drive Codex.
 
-Execution rules:
-- The rescue subagent is a forwarder, not an orchestrator. Its only job is to invoke `task` once and return that stdout unchanged; a steer request has the same shape with `steer` in place of `task`.
-- Prefer the helper over hand-rolled `git`, direct Codex CLI strings, or any other Bash activity.
-- Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel` from `codex:codex-rescue`. Only `task` and `steer` are allowed.
-- Use `task` for every rescue request, including diagnosis, planning, research, and explicit fix requests, unless the request steers a job that is already running.
-- You may use the `gpt-5-4-prompting` skill to rewrite the user's request into a tighter Codex prompt before the single `task` call.
-- That prompt drafting is the only Claude-side work allowed. Do not inspect the repo, solve the task yourself, or add independent analysis outside the forwarded prompt text.
-- Leave `--effort` unset unless the user explicitly requests a specific effort.
-- Leave model unset by default. Add `--model` only when the user explicitly asks for one.
-- Map `spark` to `--model gpt-5.3-codex-spark`.
-- Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits. `--write` gives Codex full access with no sandbox.
+- `Agent(prompt, run_in_background?, write?, model?, effort?, resume?, cwd?)`: starts a task; `resume` continues a job's Codex thread.
+- `SendMessage(to, message, summary?, cwd?)`: steers a running job at its next step, or resumes a finished job as a new job on the same thread, linked by `parentJobId`.
+- `TaskOutput(task_id, block?, timeout?, cwd?)`: reads status, live thread state, recent log, model and tokens, and the final result; blocking defaults to true.
+- `TaskStop(task_id, cwd?)`: cancels a running job.
+- `ListAgents(cwd?)`: lists session jobs with status, phase, elapsed time, input availability, model, and `<n>tok`.
 
-Command selection:
-- Use exactly one `task` or `steer` invocation per rescue handoff.
-- If the forwarded request includes `--background` or `--wait`, treat that as Claude-side execution control only. Strip it before calling `task`, and do not treat it as part of the natural-language task text.
-- If the forwarded request includes `--model`, normalize `spark` to `gpt-5.3-codex-spark` and pass it through to `task`.
-- If the forwarded request includes `--effort`, pass it through to `task`.
-- If the forwarded request includes `--resume`, strip that token from the task text and add `--resume-last`.
-- If the forwarded request includes `--fresh`, strip that token from the task text and do not add `--resume-last`.
-- If the forwarded request includes `--job <id>`, strip that token and its value from the task text and call `task --job <id>` instead of `--resume-last`.
-- `--resume`: always use `task --resume-last`, even if the request text is ambiguous.
-- `--fresh`: always use a fresh `task` run, even if the request sounds like a follow-up.
-- `--effort`: accepted values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`.
-- `task --resume-last`: internal helper for "keep going", "resume", "apply the top fix", or "dig deeper" after a previous rescue run.
-- `task --job <id>`: continue the Codex thread of a specific finished job.
-- `steer <job-id> <text>`: add input to the turn of a job that is currently running, instead of starting another `task`. Use it when the user is redirecting, steering, or adding instructions to a running Codex job they have named (a job id, or "the running task" when only one is running).
+`cwd` sets the workspace. Supply it on every tool call when a job must read or write in a specific workspace so later calls use that workspace too.
+`write: true` gives Codex full access with no sandbox (`danger-full-access`); approval policy is always `never`.
 
-Safety rules:
-- Default to write-capable Codex work in `codex:codex-rescue` unless the user explicitly asks for read-only behavior.
-- Preserve the user's task text as-is apart from stripping routing flags.
-- Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
-- Return the stdout of the `task` command exactly as-is.
-- If the Bash call fails or Codex cannot be invoked, return nothing.
+For a background task, `Agent` returns this exact recipe:
+
+```text
+Started Codex job <id>. Read it with TaskOutput. To be woken when it finishes instead of polling, run this under a background Bash call:
+node "<absolute path>/codex-companion.mjs" output <id> --wait 3600000 [--cwd <dir>]
+```
+
+Run that command under a background Bash call to receive a completion notification; an MCP tool cannot push into the Claude session.
+Finished jobs report `Model: <model> (<effort>)  Tokens: <total> total, <in> in (<cached> cached), <out> out (<reasoning> reasoning)`; `TaskOutput` preserves it and `ListAgents` shows the model and total tokens. Token usage covers that job's own turn, not the whole thread.
+
+## The CLI underneath
+
+- `task [flags] [prompt]`: starts a task, optionally in the background, with write access, model/effort selection, or a resumed thread.
+- `steer <job-id> [--prompt-file <path>] [text]`: adds input to a running turn.
+- `output <job-id> [--wait <ms>] [--tail <n>]`: reads current or final job output and can wait for completion.
+- `status [job-id] [--all]`: lists or inspects jobs.
+- `result [job-id]`: reads a finished job's stored result.
+- `cancel [job-id]`: cancels an active job.
+
+The MCP tools call these `codex-companion.mjs` subcommands. Scripts and hooks may call them directly with `--cwd <dir>` and `--json`.
+
+## Environment
+
+Codex runs shell commands in its own login shell (`zsh -lc`). Its `PATH` and tool versions can differ from the Claude session's, so pin or measure required versions inside the workspace.
+
+## Rules for the rescue wrapper
+
+- Make exactly one Bash call to `task`, or to `steer` for a running job.
+- Strip routing flags (`--background`, `--wait`, `--resume`, `--fresh`, and `--job`) from the prompt and translate them to the corresponding CLI controls.
+- Add `--write` by default unless the user asks for read-only work; leave model and effort unset unless requested.
+- Preserve the remaining task text, return stdout verbatim, and never inspect the repository or perform follow-up work.
