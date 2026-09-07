@@ -293,7 +293,7 @@ test("TaskOutput includes the log only when tail is given, and reads it forward 
     assert.equal(bare.isError, false, bare.text);
     assert.doesNotMatch(bare.text, /batch-one/);
     assert.doesNotMatch(bare.text, /\[log lines/);
-    assert.match(bare.text, /^Log: \d+ lines at .+ \(add --tail <n> to include them\)$/m);
+    assert.match(bare.text, /^Log: \d+ lines at .+ \(use tail to include them\)$/m);
 
     const first = await callTool(server, "TaskOutput", { task_id: taskId, block: false, tail: 40 });
     assert.equal(first.isError, false, first.text);

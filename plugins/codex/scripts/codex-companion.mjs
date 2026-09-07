@@ -828,7 +828,9 @@ async function handleReview(argv) {
 function resolveTaskResumeJob(cwd, reference) {
   const { job } = resolveJobReference(cwd, reference);
   if (isActiveJobStatus(job.status)) {
-    throw new Error(`Job ${job.id} is still ${job.status}. Use steer ${job.id} <text> to add input to the running turn.`);
+    throw new Error(
+      `Job ${job.id} is still ${job.status}. Add input to the running turn instead (steer, or SendMessage from the agents tools).`
+    );
   }
   if (job.jobClass !== "task" || !job.threadId) {
     throw new Error(`No Codex thread is recorded for job ${job.id}.`);
@@ -926,7 +928,9 @@ async function handleSteer(argv) {
 
   const { workspaceRoot, job } = resolveJobReference(cwd, reference);
   if (job.status !== "running") {
-    const followUp = isActiveJobStatus(job.status) ? "" : ` Use task --job ${job.id} to continue it.`;
+    const followUp = isActiveJobStatus(job.status)
+      ? ""
+      : " Continue its Codex thread instead (task --job, or SendMessage from the agents tools).";
     throw new Error(`Job ${job.id} is ${job.status}; only a running job can be steered.${followUp}`);
   }
 

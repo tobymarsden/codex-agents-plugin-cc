@@ -1924,7 +1924,7 @@ test("task --job refuses a job that is still running and points at steer", async
   assert.equal(refused.status, 1);
   assert.match(
     refused.stderr,
-    new RegExp(`Job ${runningJob.id} is still running\\. Use steer ${runningJob.id} <text>`)
+    new RegExp(`Job ${runningJob.id} is still running\\. Add input to the running turn instead`)
   );
 
   const cancelled = run("node", [SCRIPT, "cancel", runningJob.id, "--json"], { cwd: repo, env });
@@ -2006,7 +2006,7 @@ test("steer refuses jobs that are not running a Codex turn", () => {
   const refusedFinished = run("node", [SCRIPT, "steer", finishedJob.id, "change course"], { cwd: repo, env });
   assert.equal(refusedFinished.status, 1);
   assert.match(refusedFinished.stderr, /is completed; only a running job can be steered\./);
-  assert.match(refusedFinished.stderr, new RegExp(`Use task --job ${finishedJob.id} to continue it\\.`));
+  assert.match(refusedFinished.stderr, /Continue its Codex thread instead \(task --job, or SendMessage from the agents tools\)\./);
 
   const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
   state.jobs.unshift({
@@ -2055,7 +2055,7 @@ test("output peeks at a running job without blocking", async () => {
   const rendered = run("node", [SCRIPT, "output", runningJob.id], { cwd: repo, env });
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.match(rendered.stdout, new RegExp(`^Job ${runningJob.id}: running \\(`, "m"));
-  const pointer = rendered.stdout.match(/^Log: (\d+) lines at (.+) \(add --tail <n> to include them\)$/m);
+  const pointer = rendered.stdout.match(/^Log: (\d+) lines at (.+) \(use tail to include them\)$/m);
   assert.ok(pointer, rendered.stdout);
   assert.equal(pointer[2], snapshot.logFile);
   assert.ok(Number(pointer[1]) > 0, rendered.stdout);
@@ -2186,7 +2186,7 @@ test("output renders a finished job as text", () => {
   const snapshot = JSON.parse(run("node", [SCRIPT, "output", finishedJob.id, "--json"], { cwd: repo, env }).stdout);
   assert.ok(
     rendered.stdout.includes(
-      `Log: ${snapshot.logTotal} lines at ${snapshot.logFile} (add --tail <n> to include them)`
+      `Log: ${snapshot.logTotal} lines at ${snapshot.logFile} (use tail to include them)`
     ),
     rendered.stdout
   );
@@ -2197,7 +2197,7 @@ test("output renders a finished job as text", () => {
   assert.equal(tailed.status, 0, tailed.stderr);
   assert.match(tailed.stdout, /^\[[^\]]+\] /m);
   assert.match(tailed.stdout, new RegExp(`\\[log lines \\d+-${snapshot.logTotal} of ${snapshot.logTotal}\\]`));
-  assert.doesNotMatch(tailed.stdout, /add --tail <n> to include them/);
+  assert.doesNotMatch(tailed.stdout, /use tail to include them/);
 });
 
 test("output --since reads the log forward from a line offset", () => {

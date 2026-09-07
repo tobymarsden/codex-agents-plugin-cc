@@ -436,7 +436,7 @@ export function renderJobOutput(snapshot, waitTimeoutMs = null) {
     lines.push("[no new log lines since the last read]");
   } else if (snapshot.logTotal > 0) {
     // The trail stays on disk rather than in the reader's context; it is one flag away.
-    lines.push(`Log: ${snapshot.logTotal} lines at ${snapshot.logFile} (add --tail <n> to include them)`);
+    lines.push(`Log: ${snapshot.logTotal} lines at ${snapshot.logFile} (use tail to include them)`);
   }
 
   if (snapshot.result != null) {

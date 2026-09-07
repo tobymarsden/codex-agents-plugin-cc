@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1
+
+- Messages that reach a tool caller name the action rather than CLI syntax: the log pointer says `use tail`, and the two refusals that an `Agent` or `SendMessage` call can hit name both routes
+
 ## 1.4.0
 
 - `TaskOutput` and `output` return the result and its metadata, not the job's log: Codex's reasoning and commands stay on disk and the read reports the log's path, mirroring how a native subagent hands its parent a report and keeps its transcript in a file
