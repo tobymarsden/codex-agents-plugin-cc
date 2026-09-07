@@ -31,7 +31,7 @@ Add the marketplace in Claude Code:
 Install the plugin:
 
 ```bash
-/plugin install codex@tobymarsden-codex
+/plugin install codex@codex-agents
 ```
 
 Reload plugins:
