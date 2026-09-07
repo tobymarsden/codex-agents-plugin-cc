@@ -190,8 +190,9 @@ test("agents MCP tools drive a Codex job from launch through steer, resume, list
 
     const listed = await callTool(server, "ListAgents");
     assert.equal(listed.isError, false, listed.text);
-    assert.match(listed.text, new RegExp(taskId));
     assert.match(listed.text, new RegExp(resumedId));
+    // TaskOutput on the parent id resolves forward; the listing says the same thing.
+    assert.match(listed.text, new RegExp(`^${taskId}\\b.* → continued as ${resumedId}$`, "m"));
 
     const relaunched = await callTool(server, "Agent", {
       prompt: "trace the retry policy",
@@ -337,20 +338,22 @@ test("TaskOutput returns the numbered trace and one full step on request", async
     const traced = await callTool(server, "TaskOutput", { task_id: taskId, block: false, trace: true });
     assert.equal(traced.isError, false, traced.text);
     assert.match(traced.text, /^1\. message /m);
-    assert.match(traced.text, /^2\. command {5}npm run lint .+ \(exit 0, 1\.2s\)$/m);
-    assert.match(traced.text, /^3\. fileChange {2}src\/retry\.js, src\/retry\.test\.js$/m);
-    assert.match(traced.text, /^4\. tool {8}docs\/search \(completed\)$/m);
-    assert.doesNotMatch(traced.text, /lint: 0 warnings/);
+    assert.match(traced.text, /^2\. command {5}npm run lint .+ \(exit 0, 1\.2s, 13 lines out\)$/m);
+    assert.match(traced.text, /^ {15}fail 2$/m);
+    assert.match(traced.text, /^3\. fileChange {2}src\/retry\.js \(update \+1-1\), src\/retry\.test\.js \(add \+1\)$/m);
+    assert.match(traced.text, /^5\. tool {8}docs\/search \(completed\)$/m);
+    assert.doesNotMatch(traced.text, /building module alpha/);
 
     const stepped = await callTool(server, "TaskOutput", { task_id: taskId, block: false, step: 2 });
     assert.equal(stepped.isError, false, stepped.text);
     assert.match(stepped.text, /^Step 2: command at /m);
     assert.match(stepped.text, /^Status: completed, exit 0, 1\.2s$/m);
     assert.match(stepped.text, /^lint: 0 warnings$/m);
+    assert.match(stepped.text, /^not ok 3 - csv parses quoted fields$/m);
 
     const outOfRange = await callTool(server, "TaskOutput", { task_id: taskId, block: false, step: 99 });
     assert.equal(outOfRange.isError, true, outOfRange.text);
-    assert.match(outOfRange.text, /valid steps are 1-5/);
+    assert.match(outOfRange.text, /valid steps are 1-6/);
   } finally {
     await server.close();
   }
@@ -409,10 +412,23 @@ test("the Agent tool runs a job in the cwd it is given and prints the wake-up co
 
     await waitFor(() => readJobs(otherRepo).find((job) => job.id === taskId && job.status === "completed"));
 
+    // ListAgents and TaskOutput share one token formatter, so a large count reads the same
+    // way in both: `282.5k`, never a raw 282452.
+    upsertJob(otherRepo, {
+      id: "task-heavy",
+      status: "completed",
+      phase: "done",
+      jobClass: "task",
+      title: "Codex Task",
+      summary: "An earlier, heavier run",
+      tokenUsage: { totalTokens: 282452 }
+    });
+
     const listed = await callTool(server, "ListAgents", { cwd: otherRepo });
     assert.equal(listed.isError, false, listed.text);
     assert.match(listed.text, /gpt-test/);
     assert.match(listed.text, /1280tok/);
+    assert.match(listed.text, /282\.5ktok/);
 
     const missingCwd = await callTool(server, "Agent", {
       prompt: "should not run",

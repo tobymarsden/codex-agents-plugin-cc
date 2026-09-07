@@ -63,7 +63,7 @@ If Codex is installed but not logged in yet, run:
 After install, you should see:
 
 - the slash commands listed below
-- the `codex:codex-rescue` subagent in `/agents`
+- the five `agents` MCP tools described below
 
 One simple first run is:
 
@@ -126,9 +126,7 @@ This command is read-only. It does not fix code.
 
 ### `/codex:rescue`
 
-For direct control from a Claude session, use the `agents` MCP tools below; `/codex:rescue` is the slash-command route.
-
-Hands a task to Codex through the `codex:codex-rescue` subagent.
+For direct control from a Claude session, use the `agents` MCP tools below; `/codex:rescue` is the slash-command route onto the same `Agent` tool.
 
 Use it when you want Codex to:
 
@@ -197,6 +195,8 @@ node "<absolute path>/codex-companion.mjs" output <id> --wait 3600000 [--cwd <di
 ```
 
 Run that command under a background `Bash` call to receive a completion notification; an MCP tool cannot push into the session.
+
+The plugin also ships a background monitor, so an installed plugin notifies the session itself when a Codex job finishes and there is nothing to run. Monitors are an experimental Claude Code component: they start only in interactive CLI sessions, and they do not load for a project-scope plugin, so the `output --wait` command above remains the fallback where a monitor cannot run.
 
 Codex runs shell commands in its own login shell (`zsh -lc`), so its `PATH` and tool versions can differ from the Claude session's. Pin or measure a required tool version inside the workspace.
 

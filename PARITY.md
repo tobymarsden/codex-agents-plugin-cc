@@ -149,11 +149,13 @@ caller choose.
 
 ### 5e. The rescue agent
 
-`agents/codex-rescue.md` today forbids its wrapper from `status`,
-`result`, or `cancel` and mandates exactly one Bash call. With the tools
-above the wrapper can be retired, or reduced to a prompt-shaping
-front for `CodexAgent`; the main thread talks to the tools directly and
-keeps the supervision.
+Retired in 1.6.0. The wrapper forbade its subagent from `status`,
+`result`, or `cancel` and mandated exactly one Bash call, and measurement
+settled its fate: each forward cost about 58,000 subagent tokens to make
+that one call, and both uses found in real transcripts failed on model
+errors. `/codex:rescue` now calls the `Agent` tool from the main thread,
+which costs nothing extra and removes a hop; `agents/codex-rescue.md` is
+deleted.
 
 ## 6. Delivery mechanism
 

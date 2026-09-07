@@ -84,23 +84,26 @@ test("continue is not exposed as a user-facing command", () => {
   ]);
 });
 
-test("rescue command absorbs continue semantics", () => {
+test("rescue drives the agents MCP tool from the main thread instead of a subagent", () => {
   const rescue = read("commands/rescue.md");
-  const agent = read("agents/codex-rescue.md");
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
   const runtimeSkill = read("skills/codex-cli-runtime/SKILL.md");
 
-  assert.match(rescue, /The final user-visible response must be Codex's output verbatim/i);
-  assert.match(rescue, /allowed-tools:\s*Bash\(node:\*\),\s*AskUserQuestion,\s*Agent/);
-  // Regression for #234: `Skill(codex:rescue)` from the main agent recursed
-  // because rescue.md named the routing with ambiguous prose ("Route this
-  // request to the `codex:codex-rescue` subagent") while running under
-  // `context: fork` — forked general-purpose subagents do not expose the
-  // `Agent` tool, so the fork fell back to `Skill` and re-entered this
-  // command. Pin the explicit transport and the inline (no-fork) execution.
-  assert.match(rescue, /subagent_type: "codex:codex-rescue"/);
-  assert.match(rescue, /do not call `Skill\(codex:codex-rescue\)`/i);
+  // The rescue subagent is retired: each forwarded call spent tens of thousands of
+  // subagent tokens to make one Bash call, so the command now calls the plugin's own
+  // MCP tool directly. Nothing may point at the deleted agent.
+  assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, "agents")), false);
+  assert.doesNotMatch(rescue, /subagent_type|codex:codex-rescue/);
   assert.doesNotMatch(rescue, /^context:\s*fork\b/m);
+  assert.match(rescue, /The final user-visible response must be Codex's output verbatim/i);
+  assert.match(
+    rescue,
+    /allowed-tools:\s*Bash\(node:\*\),\s*AskUserQuestion,\s*mcp__plugin_codex_agents__Agent,\s*mcp__plugin_codex_agents__SendMessage/
+  );
+  assert.match(rescue, /Call the plugin's own `mcp__plugin_codex_agents__Agent` tool from this thread, with the user's request as `prompt`/i);
+  assert.match(rescue, /There is no rescue subagent: do not spawn one/i);
+  // Regression for #234: `Skill(codex:rescue)` re-enters this command and hangs the session.
+  assert.match(rescue, /do not call `Skill\(codex:rescue\)`/i);
   assert.match(rescue, /--background\|--wait/);
   assert.match(rescue, /--resume\|--fresh/);
   assert.match(rescue, /--model <model\|spark>/);
@@ -109,55 +112,44 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(rescue, /AskUserQuestion/);
   assert.match(rescue, /Continue current Codex thread/);
   assert.match(rescue, /Start a new Codex thread/);
-  assert.match(rescue, /run the `codex:codex-rescue` subagent in the background/i);
-  assert.match(rescue, /default to foreground/i);
-  assert.match(rescue, /Do not forward them to `task`/i);
+  assert.match(rescue, /If the request includes `--background`, call the tool with `run_in_background: true`/i);
+  assert.match(rescue, /If the request includes `--wait`, call the tool with `run_in_background: false`/i);
+  assert.match(rescue, /If neither flag is present, default to `run_in_background: false`/i);
+  assert.match(rescue, /Do not put them in `prompt`/i);
   assert.match(rescue, /`--model` and `--effort` are runtime-selection flags/i);
-  assert.match(rescue, /Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort/i);
+  assert.match(rescue, /Pass them as the `model` and `effort` parameters/i);
+  assert.match(rescue, /Leave `effort` unset unless the user explicitly asks for a specific reasoning effort/i);
+  assert.match(rescue, /accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`/i);
   assert.match(rescue, /`spark` maps to the current Codex Spark model/i);
   assert.match(rescue, /If the request includes `--resume`, do not ask whether to continue/i);
   assert.match(rescue, /If the request includes `--fresh`, do not ask whether to continue/i);
-  assert.match(rescue, /If the user chooses continue, add `--resume`/i);
-  assert.match(rescue, /If the user chooses a new thread, add `--fresh`/i);
-  assert.match(rescue, /thin forwarder only/i);
-  assert.match(rescue, /Return the Codex companion stdout verbatim to the user/i);
+  assert.match(rescue, /If the user chooses continue, pass the helper's `candidate\.id` as `resume`/i);
+  assert.match(rescue, /If the user chooses a new thread, leave `resume` unset/i);
+  assert.match(rescue, /`--resume` and `--job <id>` both become `resume: <job id>`/i);
+  assert.match(rescue, /Make exactly one `mcp__plugin_codex_agents__Agent` call/i);
+  assert.match(rescue, /that single call is `mcp__plugin_codex_agents__SendMessage` with `to` set to that job id/i);
+  assert.match(rescue, /Pass `write: true` by default unless the user explicitly asks for read-only work/i);
+  assert.match(rescue, /Return the tool output verbatim to the user/i);
   assert.match(rescue, /Do not paraphrase, summarize, rewrite, or add commentary before or after it/i);
-  assert.match(rescue, /return that command's stdout as-is/i);
-  assert.match(rescue, /Leave `--resume` and `--fresh` in the forwarded request/i);
-  assert.match(agent, /--resume/);
-  assert.match(agent, /--fresh/);
-  assert.match(agent, /thin forwarding wrapper/i);
-  assert.match(agent, /prefer foreground for a small, clearly bounded rescue request/i);
-  assert.match(agent, /If the user did not explicitly choose `--background` or `--wait` and the task looks complicated, open-ended, multi-step, or likely to keep Codex running for a long time, prefer background execution/i);
-  assert.match(agent, /Use exactly one `Bash` call/i);
-  assert.match(agent, /Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own/i);
-  assert.match(agent, /Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
-  assert.match(agent, /Leave `--effort` unset unless the user explicitly requests a specific reasoning effort/i);
-  assert.match(agent, /Leave model unset by default/i);
-  assert.match(agent, /`spark` maps to the current Codex Spark model/i);
-  assert.match(agent, /If the user asks for a concrete model slug such as `gpt-5\.5`, pass it through with `--model`/i);
-  assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
-  assert.match(agent, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
-  assert.doesNotMatch(agent, /gpt-5-4-prompting|gpt-5\.3-codex-spark/);
-  // The wrapper makes one Bash call, so it attaches no skills and carries the forwarding
-  // rules the runtime skill used to supply itself.
-  assert.doesNotMatch(agent, /^skills:/m);
-  assert.doesNotMatch(agent, /codex-prompting|codex-cli-runtime/);
-  assert.match(agent, /Forward the user's task text as-is/i);
-  assert.match(agent, /accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`/i);
-  assert.match(agent, /Treat `--background`, `--wait`, `--resume`, `--fresh`, and `--job <id>` as routing controls/i);
-  assert.match(agent, /Default to a write-capable Codex run by adding `--write`/i);
+  assert.match(rescue, /Preserve the user's task text as-is in `prompt`/i);
+  assert.match(rescue, /If the tool call fails or Codex cannot be invoked, report that failure and stop/i);
   assert.match(runtimeSkill, /## The agents MCP tools/);
-  assert.match(runtimeSkill, /## Rules for the rescue wrapper/);
-  assert.match(runtimeSkill, /Make exactly one Bash call to `task`, or to `steer` for a running job/i);
-  assert.match(runtimeSkill, /Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`/i);
-  assert.match(runtimeSkill, /Strip routing flags \(`--background`, `--wait`, `--resume`, `--fresh`, and `--job`\)/i);
+  assert.match(runtimeSkill, /## How `\/codex:rescue` routes/);
+  assert.doesNotMatch(runtimeSkill, /rescue wrapper|codex:codex-rescue/);
+  assert.match(runtimeSkill, /makes exactly one `Agent` call, or one `SendMessage` call when the request steers a job that is already running/i);
+  assert.match(runtimeSkill, /There is no rescue subagent/i);
+  assert.match(
+    runtimeSkill,
+    /Strip the flags \(`--background`, `--wait`, `--resume`, `--fresh`, `--job`, `--model`, and `--effort`\)/i
+  );
+  assert.match(runtimeSkill, /`--background` to `run_in_background: true`/i);
+  assert.match(runtimeSkill, /`--resume` and `--job <id>` to `resume: <job id>`/i);
+  assert.match(runtimeSkill, /Pass `write: true` by default unless the user asks for read-only work/i);
   assert.match(runtimeSkill, /leave model and effort unset unless requested/i);
-  assert.match(runtimeSkill, /`--effort` accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`/i);
+  assert.match(runtimeSkill, /`effort` accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`/i);
   assert.match(runtimeSkill, /never inspect the repository or perform follow-up work/i);
-  assert.match(runtimeSkill, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
+  assert.match(runtimeSkill, /If the tool call fails or Codex cannot be invoked, report that failure and stop/i);
   assert.doesNotMatch(runtimeSkill, /gpt-5\.3-codex-spark|gpt-5-4-prompting/);
-  assert.match(readme, /`codex:codex-rescue` subagent/i);
   assert.match(readme, /if you do not pass `--model` or `--effort`, Codex chooses its own defaults/i);
   assert.match(readme, /--model gpt-5\.5 --effort medium/i);
   assert.match(readme, /`spark` maps to the current Codex Spark model/i);
@@ -197,13 +189,29 @@ test("internal docs use task terminology for rescue runs", () => {
   const promptRecipes = read("skills/codex-prompting/references/codex-prompt-recipes.md");
 
   assert.match(runtimeSkill, /`task \[flags\] \[prompt\]`/);
-  assert.match(runtimeSkill, /Make exactly one Bash call to `task`, or to `steer` for a running job/i);
   assert.match(runtimeSkill, /`steer <job-id>/);
   assert.match(promptingSkill, /Use `task` when the task is diagnosis/i);
+  assert.match(promptingSkill, /`\/codex:rescue`/);
+  assert.match(promptRecipes, /In `\/codex:rescue`, run diagnosis and fix-oriented recipes in write mode by default/i);
+  for (const source of [promptingSkill, promptRecipes, read("skills/codex-result-handling/SKILL.md")]) {
+    assert.doesNotMatch(source, /codex:codex-rescue/);
+  }
   assert.match(promptRecipes, /Codex task prompts/i);
   assert.match(promptRecipes, /Use these as starting templates for Codex task prompts/i);
   assert.match(promptRecipes, /## Diagnosis/);
   assert.match(promptRecipes, /## Narrow Fix/);
+});
+
+test("the plugin declares a job-completion monitor Claude Code can start", () => {
+  const monitors = JSON.parse(read(path.join("monitors", "monitors.json")));
+
+  assert.equal(Array.isArray(monitors), true);
+  assert.equal(monitors.length, 1);
+  const [monitor] = monitors;
+  assert.equal(monitor.name, "codex-jobs");
+  assert.equal(monitor.description, "Codex job completions");
+  assert.equal(monitor.command, 'node "${CLAUDE_PLUGIN_ROOT}/scripts/job-completion-monitor.mjs"');
+  assert.equal(fs.existsSync(path.join(PLUGIN_ROOT, "scripts", "job-completion-monitor.mjs")), true);
 });
 
 test("hooks keep session-end cleanup and stop gating enabled", () => {

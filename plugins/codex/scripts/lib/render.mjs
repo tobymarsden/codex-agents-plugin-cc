@@ -387,7 +387,7 @@ export function renderJobStatusReport(job) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
-function formatTokenCount(value) {
+export function formatTokenCount(value) {
   const count = Number(value ?? 0);
   return count > 9999 ? `${(count / 1000).toFixed(1)}k` : String(count);
 }
@@ -445,17 +445,76 @@ function relativeToWorkspace(filePath, workspaceRoot) {
   return filePath.slice(workspaceRoot.length + 1);
 }
 
+const OUTPUT_TAIL_BUDGET = 400;
+const OUTPUT_TAIL_MAX_LINES = 10;
+const OUTPUT_TAIL_WIDTH = 100;
+
+/** The non-blank lines of a command's output: its size, and the tail the trace shows. */
+function commandOutputLines(output) {
+  return String(output ?? "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line !== "");
+}
+
+/**
+ * Trailing output lines within a character budget rather than a fixed count: a test
+ * runner's summary block is many short lines and all of it matters, while a chatty build
+ * log is few long ones and the last of them is enough. Mechanical either way.
+ */
+function outputTail(lines) {
+  const tail = [];
+  let budget = OUTPUT_TAIL_BUDGET;
+  for (let index = lines.length - 1; index >= 0 && tail.length < OUTPUT_TAIL_MAX_LINES; index -= 1) {
+    const line = lines[index];
+    if (tail.length > 0 && budget - line.length < 0) {
+      break;
+    }
+    budget -= line.length;
+    tail.unshift(line);
+  }
+  return tail;
+}
+
+function truncateOutputLine(line) {
+  return line.length <= OUTPUT_TAIL_WIDTH ? line : `${line.slice(0, OUTPUT_TAIL_WIDTH - 3)}...`;
+}
+
+/** A change's size, counted off its diff, so a new stub reads differently from a rewrite. */
+function formatChangeSize(diff) {
+  let added = 0;
+  let removed = 0;
+  for (const line of String(diff ?? "").split("\n")) {
+    if (line.startsWith("+")) {
+      added += line.startsWith("+++") ? 0 : 1;
+    } else if (line.startsWith("-")) {
+      removed += line.startsWith("---") ? 0 : 1;
+    }
+  }
+  return `${added > 0 ? `+${added}` : ""}${removed > 0 ? `-${removed}` : ""}`;
+}
+
 function traceLineBody(record, workspaceRoot) {
   switch (record.type) {
     case "command": {
+      const output = commandOutputLines(record.output);
       const detail = [
         record.exitCode == null ? null : `exit ${record.exitCode}`,
-        record.durationMs ? formatDurationMs(record.durationMs) : null
+        record.durationMs ? formatDurationMs(record.durationMs) : null,
+        output.length > 0 ? `${output.length} lines out` : null
       ].filter(Boolean);
-      return detail.length > 0 ? `${record.command} (${detail.join(", ")})` : String(record.command ?? "");
+      const head = detail.length > 0 ? `${record.command} (${detail.join(", ")})` : String(record.command ?? "");
+      // An exit code is not an outcome. The tail is where a runner's summary block lands,
+      // whatever the runner, and it is taken mechanically: the trace never reads output.
+      return [head, ...outputTail(output).map(truncateOutputLine)].join("\n");
     }
     case "fileChange":
-      return (record.paths ?? []).map((filePath) => relativeToWorkspace(filePath, workspaceRoot)).join(", ");
+      return (record.changes ?? [])
+        .map((change) => {
+          const size = formatChangeSize(change.diff);
+          return `${relativeToWorkspace(change.path, workspaceRoot)} (${formatChangeKind(change.kind)}${size ? ` ${size}` : ""})`;
+        })
+        .join(", ");
     case "message":
       return String(record.text ?? "").trimEnd();
     case "tool": {
@@ -652,21 +711,14 @@ export function renderStoredJobResult(job, storedJob) {
   return `${lines.join("\n").trimEnd()}\n`;
 }
 
+/** Status lines in `renderJobOutput`'s voice: a tool caller has no slash commands to run. */
 export function renderCancelReport(job) {
-  const lines = [
-    "# Codex Cancel",
-    "",
-    `Cancelled ${job.id}.`,
-    ""
-  ];
+  const lines = [`Job ${job.id}: cancelled`];
 
-  if (job.title) {
-    lines.push(`- Title: ${job.title}`);
-  }
   if (job.summary) {
-    lines.push(`- Summary: ${job.summary}`);
+    lines.push(`Summary: ${job.summary}`);
   }
-  lines.push("- Check `/codex:status` for the updated queue.");
+  lines.push("Read the job to see what it recorded before the stop.");
 
   return `${lines.join("\n").trimEnd()}\n`;
 }

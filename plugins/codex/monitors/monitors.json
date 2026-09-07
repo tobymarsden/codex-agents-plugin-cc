@@ -1,0 +1,7 @@
+[
+  {
+    "name": "codex-jobs",
+    "description": "Codex job completions",
+    "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/job-completion-monitor.mjs\""
+  }
+]

@@ -1879,6 +1879,44 @@ test("cancel sends turn interrupt to the shared app-server before killing a brok
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
+test("a cancelled job keeps the tokens its interrupted turn spent and reports the stop plainly", async () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "interruptible-slow-task");
+  commitFixtureRepo(repo);
+
+  const env = buildEnv(binDir);
+  const statePath = path.join(resolveStateDir(repo), "state.json");
+  const launched = run("node", [SCRIPT, "task", "--background", "--json", "investigate the flaky worker timeout"], {
+    cwd: repo,
+    env
+  });
+  assert.equal(launched.status, 0, launched.stderr);
+  const jobId = JSON.parse(launched.stdout).jobId;
+
+  // Usage is written as it arrives, which is the only chance a job killed mid-turn has.
+  const running = await waitFor(() => {
+    const job = JSON.parse(fs.readFileSync(statePath, "utf8")).jobs.find((candidate) => candidate.id === jobId);
+    return job?.status === "running" && job.tokenUsage ? job : null;
+  }, { timeoutMs: 15000 });
+  assert.equal(running.tokenUsage.totalTokens, 930);
+
+  const cancelled = run("node", [SCRIPT, "cancel", jobId], { cwd: repo, env });
+  assert.equal(cancelled.status, 0, cancelled.stderr);
+  assert.match(cancelled.stdout, new RegExp(`^Job ${jobId}: cancelled$`, "m"));
+  assert.doesNotMatch(cancelled.stdout, /^#/m, "the cancel report is status lines, not a markdown document");
+  assert.doesNotMatch(cancelled.stdout, /Title:/);
+  assert.doesNotMatch(cancelled.stdout, /\/codex:/, "a tool caller cannot run a slash command");
+
+  const indexed = JSON.parse(fs.readFileSync(statePath, "utf8")).jobs.find((job) => job.id === jobId);
+  assert.equal(indexed.status, "cancelled");
+  assert.equal(indexed.tokenUsage.totalTokens, 930);
+  const stored = JSON.parse(fs.readFileSync(path.join(resolveStateDir(repo), "jobs", `${jobId}.json`), "utf8"));
+  assert.equal(stored.tokenUsage.totalTokens, 930);
+
+  endFixtureSession(repo, env);
+});
+
 function commitFixtureRepo(repo) {
   initGitRepo(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
@@ -2232,25 +2270,30 @@ test("a job writes a structured event store beside its log", () => {
 
   assert.deepEqual(
     records.map((record) => record.n),
-    [1, 2, 3, 4, 5]
+    [1, 2, 3, 4, 5, 6]
   );
   assert.deepEqual(
     records.map((record) => record.type),
-    ["message", "command", "fileChange", "tool", "message"]
+    ["message", "command", "fileChange", "command", "tool", "message"]
   );
   assert.ok(records.every((record) => !Number.isNaN(Date.parse(record.at))), job.eventsFile);
   assert.equal(records[1].command, TRACE_FIXTURE_COMMAND);
   assert.equal(records[1].exitCode, 0);
   assert.equal(records[1].durationMs, 1234);
-  assert.match(records[1].output, /lint: 0 warnings\ntest: 12 passed/);
+  assert.match(records[1].output, /lint: 0 warnings\n/);
+
+  // The server reports this command as `durationMs: 0`, so the record carries the elapsed
+  // measured between its start and its completion instead.
+  assert.equal(records[3].command, "git status --porcelain");
+  assert.ok(records[3].durationMs >= 20, `measured duration was ${records[3].durationMs}`);
   assert.deepEqual(
     records[2].paths.map((filePath) => filePath.replace(/^.*\//, "")),
     ["retry.js", "retry.test.js"]
   );
   assert.ok(records[2].paths.every((filePath) => filePath.startsWith("/")), "the store keeps absolute paths");
   assert.equal(records[2].changes.length, 2);
-  assert.equal(records[3].server, "docs");
-  assert.deepEqual(records[3].arguments, { query: "retry policy", limit: 3 });
+  assert.equal(records[4].server, "docs");
+  assert.deepEqual(records[4].arguments, { query: "retry policy", limit: 3 });
 });
 
 test("output --trace numbers every action and keeps what the log truncates", () => {
@@ -2262,19 +2305,39 @@ test("output --trace numbers every action and keeps what the log truncates", () 
 
   assert.match(traced.stdout, /^1\. message {5}Planning the change\.$/m);
   assert.match(traced.stdout, /^ {15}First lint, then edit\.$/m);
-  assert.match(traced.stdout, /^3\. fileChange {2}src\/retry\.js, src\/retry\.test\.js$/m);
+  // Each change carries its kind and its size, so a new stub cannot pass for a rewrite.
+  assert.match(traced.stdout, /^3\. fileChange {2}src\/retry\.js \(update \+1-1\), src\/retry\.test\.js \(add \+1\)$/m);
   assert.doesNotMatch(traced.stdout, /0ms/, "a duration the server reports as zero is noise, not data");
-  assert.match(traced.stdout, /^4\. tool {8}docs\/search \(completed\)$/m);
-  assert.match(traced.stdout, /^5\. message /m);
+  assert.match(traced.stdout, /^5\. tool {8}docs\/search \(completed\)$/m);
+  assert.match(traced.stdout, /^6\. message /m);
 
   // The trace carries the whole command; the human log only ever had 96 characters of it.
   assert.ok(TRACE_FIXTURE_COMMAND.length > 96);
-  assert.ok(traced.stdout.includes(`2. command     ${TRACE_FIXTURE_COMMAND} (exit 0, 1.2s)`), traced.stdout);
+  assert.ok(
+    traced.stdout.includes(`2. command     ${TRACE_FIXTURE_COMMAND} (exit 0, 1.2s, 13 lines out)`),
+    traced.stdout
+  );
   const log = fs.readFileSync(job.logFile, "utf8");
   assert.ok(!log.includes(TRACE_FIXTURE_COMMAND), log);
 
-  // Level 2 is what was done, never the output or the diff behind it.
-  assert.doesNotMatch(traced.stdout, /lint: 0 warnings/);
+  // An exit code is not an outcome: the last four non-blank lines come with it, indented to
+  // the continuation column, each capped at 100 characters.
+  for (const summaryLine of ["tests 12", "pass 10", "fail 2"]) {
+    assert.match(traced.stdout, new RegExp(`^ {15}${summaryLine}$`, "m"));
+  }
+  const truncated = traced.stdout.split("\n").find((line) => line.includes("failing tests:"));
+  assert.equal(truncated.slice(0, 15), " ".repeat(15));
+  assert.equal(truncated.trim().length, 100);
+  assert.ok(truncated.endsWith("..."), truncated);
+  // The tail is bounded by a character budget, so a runner's summary survives while the
+  // preamble above it stays behind --step.
+  assert.doesNotMatch(traced.stdout, /building module alpha/);
+
+  // A command with no output gets neither the count nor a tail, and its measured duration
+  // stands in for the zero the server reported.
+  assert.match(traced.stdout, /^4\. command {5}git status --porcelain \(exit 0, \d+ms\)$/m);
+
+  // Level 2 is what was done, never the whole output or the diff behind it.
   assert.doesNotMatch(traced.stdout, /const attempts/);
   assert.doesNotMatch(traced.stdout, /@@/);
   assert.doesNotMatch(traced.stdout, /retry policy", "limit/);
@@ -2289,7 +2352,7 @@ test("output --step returns the whole record behind one trace line", () => {
   assert.equal(command.status, 0, command.stderr);
   assert.match(command.stdout, /^Step 2: command at /m);
   assert.match(command.stdout, /^Status: completed, exit 0, 1\.2s$/m);
-  assert.match(command.stdout, /^lint: 0 warnings\ntest: 12 passed\ntrace fixture command finished$/m);
+  assert.match(command.stdout, /^not ok 3 - csv parses quoted fields$/m);
 
   const fileChange = step(3);
   assert.equal(fileChange.status, 0, fileChange.stderr);
@@ -2298,7 +2361,7 @@ test("output --step returns the whole record behind one trace line", () => {
   assert.match(fileChange.stdout, /src\/retry\.test\.js \(add\)$/m);
   assert.match(fileChange.stdout, /^\+test\('retries three times', \(\) => \{\}\);$/m);
 
-  const tool = step(4);
+  const tool = step(5);
   assert.equal(tool.status, 0, tool.stderr);
   assert.match(tool.stdout, /^Tool: docs\/search$/m);
   assert.match(tool.stdout, /^Arguments:\n\{\n {2}"query": "retry policy",\n {2}"limit": 3\n\}$/m);
@@ -2311,7 +2374,7 @@ test("output rejects a step outside the trace and --trace with --step", () => {
 
   const outOfRange = run("node", [SCRIPT, "output", job.id, "--step", "99"], { cwd: repo, env });
   assert.equal(outOfRange.status, 1);
-  assert.match(outOfRange.stderr, new RegExp(`Step 99 is out of range for job ${job.id}; valid steps are 1-5\\.`));
+  assert.match(outOfRange.stderr, new RegExp(`Step 99 is out of range for job ${job.id}; valid steps are 1-6\\.`));
 
   const both = run("node", [SCRIPT, "output", job.id, "--trace", "--step", "1"], { cwd: repo, env });
   assert.equal(both.status, 1);

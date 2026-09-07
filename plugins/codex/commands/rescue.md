@@ -1,23 +1,24 @@
 ---
-description: Delegate investigation, an explicit fix request, or follow-up rescue work to the Codex rescue subagent
+description: Delegate investigation, an explicit fix request, or follow-up rescue work to Codex
 argument-hint: "[--background|--wait] [--resume|--fresh|--job <id>] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [what Codex should investigate, solve, or continue]"
-allowed-tools: Bash(node:*), AskUserQuestion, Agent
+allowed-tools: Bash(node:*), AskUserQuestion, mcp__plugin_codex_agents__Agent, mcp__plugin_codex_agents__SendMessage
 ---
 
-Invoke the `codex:codex-rescue` subagent via the `Agent` tool (`subagent_type: "codex:codex-rescue"`), forwarding the raw user request as the prompt.
-`codex:codex-rescue` is a subagent, not a skill — do not call `Skill(codex:codex-rescue)` (no such skill) or `Skill(codex:rescue)` (that re-enters this command and hangs the session). The command runs inline so the `Agent` tool stays in scope; forked general-purpose subagents do not expose it.
+Call the plugin's own `mcp__plugin_codex_agents__Agent` tool from this thread, with the user's request as `prompt`.
+There is no rescue subagent: do not spawn one, and do not call `Skill(codex:rescue)` (that re-enters this command and hangs the session). The command runs inline so the MCP tools stay in scope.
 The final user-visible response must be Codex's output verbatim.
 
 Raw user request:
+
 $ARGUMENTS
 
 Execution mode:
 
-- If the request includes `--background`, run the `codex:codex-rescue` subagent in the background.
-- If the request includes `--wait`, run the `codex:codex-rescue` subagent in the foreground.
-- If neither flag is present, default to foreground.
-- `--background` and `--wait` are execution flags for Claude Code. Do not forward them to `task`, and do not treat them as part of the natural-language task text.
-- `--model` and `--effort` are runtime-selection flags. Preserve them for the forwarded `task` call, but do not treat them as part of the natural-language task text.
+- If the request includes `--background`, call the tool with `run_in_background: true`.
+- If the request includes `--wait`, call the tool with `run_in_background: false`.
+- If neither flag is present, default to `run_in_background: false`.
+- `--background` and `--wait` are execution flags for Claude Code. Do not put them in `prompt`, and do not treat them as part of the natural-language task text.
+- `--model` and `--effort` are runtime-selection flags. Pass them as the `model` and `effort` parameters, and do not treat them as part of the natural-language task text.
 - If the request includes `--resume`, do not ask whether to continue. The user already chose.
 - If the request includes `--fresh`, do not ask whether to continue. The user already chose.
 - If the request includes `--job <id>`, do not ask whether to continue. The user already named the job to continue.
@@ -33,21 +34,22 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task-resume-candidate -
   - `Start a new Codex thread`
 - If the user is clearly giving a follow-up instruction such as "continue", "keep going", "resume", "apply the top fix", or "dig deeper", put `Continue current Codex thread (Recommended)` first.
 - Otherwise put `Start a new Codex thread (Recommended)` first.
-- If the user chooses continue, add `--resume` before routing to the subagent.
-- If the user chooses a new thread, add `--fresh` before routing to the subagent.
+- If the user chooses continue, pass the helper's `candidate.id` as `resume`.
+- If the user chooses a new thread, leave `resume` unset.
 - If the helper reports `available: false`, do not ask. Route normally.
 
 Operating rules:
 
-- The subagent is a thin forwarder only. It should use one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" task ...` and return that command's stdout as-is.
-- If the user is redirecting, steering, or adding instructions to a Codex job that is currently running and names it (a job id, or "the running task" when only one is running), that single call is `steer <job-id> <text>` instead of `task`.
-- Return the Codex companion stdout verbatim to the user.
+- Make exactly one `mcp__plugin_codex_agents__Agent` call and return its output as-is.
+- If the user is redirecting, steering, or adding instructions to a Codex job that is currently running and names it (a job id, or "the running task" when only one is running), that single call is `mcp__plugin_codex_agents__SendMessage` with `to` set to that job id instead.
+- Return the tool output verbatim to the user.
 - Do not paraphrase, summarize, rewrite, or add commentary before or after it.
-- Do not ask the subagent to inspect files, monitor progress, poll `/codex:status`, fetch `/codex:result`, call `/codex:cancel`, summarize output, or do follow-up work of its own.
-- Leave `--effort` unset unless the user explicitly asks for a specific reasoning effort.
-- Leave the model unset unless the user explicitly asks for one. `spark` maps to the current Codex Spark model (the alias lives in `MODEL_ALIASES` in `codex-companion.mjs`).
-- Leave `--resume` and `--fresh` in the forwarded request. The subagent handles that routing when it builds the `task` command.
-- Leave `--job <id>` in the forwarded request too. The subagent maps it to `task --job <id>`.
-- `--write` gives Codex full access with no sandbox. The subagent adds it by default unless the user asks for read-only work.
+- Do not inspect files, monitor progress, poll `/codex:status`, fetch `/codex:result`, call `/codex:cancel`, summarize output, or do follow-up work of your own.
+- Leave `effort` unset unless the user explicitly asks for a specific reasoning effort. Its accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+- Leave `model` unset unless the user explicitly asks for one. `spark` maps to the current Codex Spark model (the alias lives in `MODEL_ALIASES` in `codex-companion.mjs`).
+- `--resume` and `--job <id>` both become `resume: <job id>`, which continues that job's Codex thread. `--fresh` means leave `resume` unset.
+- Pass `write: true` by default unless the user explicitly asks for read-only work, review, diagnosis, or research without edits. `write: true` gives Codex full access with no sandbox.
+- Preserve the user's task text as-is in `prompt` apart from stripping the flags above. Do not reshape it into a better prompt, reason through the problem yourself, or draft a solution.
+- If the tool call fails or Codex cannot be invoked, report that failure and stop. Do not answer the request yourself.
 - If the helper reports that Codex is missing or unauthenticated, stop and tell the user to run `/codex:setup`.
 - If the user did not supply a request, ask what Codex should investigate or fix.

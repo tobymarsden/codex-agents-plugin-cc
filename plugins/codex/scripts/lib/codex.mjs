@@ -14,6 +14,7 @@
  *   threadTurnIds: Map<string, string>,
  *   threadLabels: Map<string, string>,
  *   turnId: string | null,
+ *   itemStarts: Map<string, number>,
  *   bufferedNotifications: AppServerNotification[],
  *   completion: Promise<TurnCaptureState>,
  *   resolveCompletion: (state: TurnCaptureState) => void,
@@ -383,10 +384,16 @@ function describeItemRecord(item) {
   }
 }
 
-function buildItemRecord(item) {
+function buildItemRecord(item, measuredDurationMs = null) {
   const record = describeItemRecord(item);
   if (!record) {
     return null;
+  }
+  // The server reports `durationMs: 0` for items that plainly took time, so the elapsed
+  // measured between `item/started` and `item/completed` stands in. A duration is a
+  // duration: the trace does not label the two apart.
+  if (measuredDurationMs && "durationMs" in record && !record.durationMs) {
+    record.durationMs = measuredDurationMs;
   }
   const cap = { truncated: false };
   const capped = capEventStrings(record, cap);
@@ -412,6 +419,7 @@ function createTurnCaptureState(threadId, options = {}) {
     threadTurnIds: new Map(),
     threadLabels: new Map(),
     turnId: null,
+    itemStarts: new Map(),
     bufferedNotifications: [],
     completion,
     resolveCompletion,
@@ -671,6 +679,7 @@ function applyTurnNotification(state, message) {
     case "item/started":
       recordItem(state, message.params.item, "started", message.params.threadId ?? null);
       {
+        state.itemStarts.set(message.params.item.id, Date.now());
         const update = describeStartedItem(state, message.params.item);
         emitProgress(state.onProgress, update?.message, update?.phase ?? null);
       }
@@ -679,9 +688,11 @@ function applyTurnNotification(state, message) {
       recordItem(state, message.params.item, "completed", message.params.threadId ?? null);
       {
         const update = describeCompletedItem(state, message.params.item);
+        const startedAt = state.itemStarts.get(message.params.item.id);
+        state.itemStarts.delete(message.params.item.id);
         // The store takes the item whole; the log keeps its shortened line. An item with
         // no log line of its own (a message, a reasoning summary) still earns a record.
-        const record = buildItemRecord(message.params.item);
+        const record = buildItemRecord(message.params.item, startedAt ? Date.now() - startedAt : null);
         if (state.onProgress && (update?.message || record)) {
           state.onProgress({ message: update?.message ?? "", phase: update?.phase ?? null, record });
         }
@@ -690,6 +701,8 @@ function applyTurnNotification(state, message) {
     case "thread/tokenUsage/updated":
       if ((message.params.threadId ?? null) === state.rootThreadId) {
         recordTokenUsage(state, message.params.tokenUsage);
+        // Persisted as it arrives, so a job killed mid-turn still reports what it spent.
+        state.onProgress?.({ message: "", phase: null, tokenUsage: buildTurnTokenUsage(state) });
       }
       break;
     case "error":

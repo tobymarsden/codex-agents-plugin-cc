@@ -185,6 +185,9 @@ function saveImportLedger(ledger) {
 // running sum, so a second turn on the same thread proves the per-job delta.
 const TURN_TOKEN_USAGE = { inputTokens: 1200, cachedInputTokens: 300, outputTokens: 80, reasoningOutputTokens: 40, totalTokens: 1280, cacheWriteInputTokens: 0 };
 
+// What a turn has already spent partway through, before any turn/completed lands.
+const MIDTURN_TOKEN_USAGE = { inputTokens: 900, cachedInputTokens: 0, outputTokens: 20, reasoningOutputTokens: 10, totalTokens: 930, cacheWriteInputTokens: 0 };
+
 function emitTokenUsage(threadId, turnId) {
   const state = loadState();
   const thread = state.threads.find((entry) => entry.id === threadId);
@@ -203,12 +206,20 @@ function emitTokenUsage(threadId, turnId) {
   });
 }
 
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 function emitTurnCompleted(threadId, turnId, item) {
   const items = Array.isArray(item) ? item : [item];
   send({ method: "turn/started", params: { threadId, turn: buildTurn(turnId) } });
   for (const entry of items) {
     if (entry && entry.started) {
       send({ method: "item/started", params: { threadId, turnId, item: entry.started } });
+    }
+    if (entry && entry.pauseMs) {
+      // Real elapsed time between the two notifications, so the reader can measure it.
+      sleepSync(entry.pauseMs);
     }
     if (entry && entry.completed) {
       send({ method: "item/completed", params: { threadId, turnId, item: entry.completed } });
@@ -280,6 +291,27 @@ function structuredReviewPayload(prompt) {
 // trace keeping it whole where the log does not.
 const TRACE_COMMAND = "npm run lint -- --max-warnings 0 && npm test -- --runInBand --reporters=default && echo 'trace fixture command finished'";
 
+// A runner's summary block sits in the last lines of its output, and one of those lines is
+// far longer than the width the trace shows.
+const TRACE_COMMAND_OUTPUT = [
+  // A real runner buries its summary under a noisy preamble; the trace's tail budget is
+  // what keeps the summary and drops this.
+  "  building module alpha ................................. ok",
+  "  building module bravo ................................. ok",
+  "  building module charlie ............................... ok",
+  "  building module delta ................................. ok",
+  "  building module echo .................................. ok",
+  "> npm run lint",
+  "lint: 0 warnings",
+  "",
+  "> npm test",
+  "not ok 3 - csv parses quoted fields",
+  "tests 12",
+  "pass 10",
+  "fail 2",
+  "failing tests: " + "tests/csv.test.mjs:41 ".repeat(8)
+].join("\\n");
+
 function traceItems(turnId, cwd, payload) {
   const command = {
     type: "commandExecution",
@@ -293,6 +325,7 @@ function traceItems(turnId, cwd, payload) {
     exitCode: null,
     durationMs: null
   };
+  const silent = { ...command, id: "cmd_silent_" + turnId, command: "git status --porcelain" };
   return [
     {
       completed: { type: "reasoning", id: "reasoning_empty_" + turnId, summary: [], content: [] }
@@ -305,7 +338,7 @@ function traceItems(turnId, cwd, payload) {
       completed: {
         ...command,
         status: "completed",
-        aggregatedOutput: "lint: 0 warnings\\ntest: 12 passed\\ntrace fixture command finished",
+        aggregatedOutput: TRACE_COMMAND_OUTPUT,
         exitCode: 0,
         durationMs: 1234
       }
@@ -320,6 +353,12 @@ function traceItems(turnId, cwd, payload) {
           { path: cwd + "/src/retry.test.js", kind: { type: "add" }, diff: "@@ -0,0 +1,1 @@\\n+test('retries three times', () => {});" }
         ]
       }
+    },
+    {
+      // No output, and a duration the server reports as zero: the reader measures its own.
+      pauseMs: 40,
+      started: silent,
+      completed: { ...silent, status: "completed", aggregatedOutput: "", exitCode: 0, durationMs: 0 }
     },
     {
       completed: {
@@ -701,6 +740,10 @@ rl.on("line", (line) => {
 
 	        if (INTERRUPTIBLE) {
 	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
+	          send({
+	            method: "thread/tokenUsage/updated",
+	            params: { threadId: thread.id, turnId, tokenUsage: { last: MIDTURN_TOKEN_USAGE, total: MIDTURN_TOKEN_USAGE, modelContextWindow: 272000 } }
+	          });
 	          const pending = { turnId, threadId: thread.id, steerText: null, timer: null };
 	          pending.timer = setTimeout(() => {
 	            if (!interruptibleTurns.has(turnId)) {

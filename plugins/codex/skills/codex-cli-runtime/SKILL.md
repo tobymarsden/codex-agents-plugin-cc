@@ -1,6 +1,6 @@
 ---
 name: codex-cli-runtime
-description: "How Claude Code drives Codex: the agents MCP tools for the main thread, the codex-companion CLI underneath, and the forwarding rules for the rescue wrapper"
+description: "How Claude Code drives Codex: the agents MCP tools for the main thread, the codex-companion CLI underneath, and how /codex:rescue routes onto them"
 user-invocable: false
 ---
 
@@ -44,12 +44,11 @@ The MCP tools call these `codex-companion.mjs` subcommands. Scripts and hooks ma
 
 Codex runs shell commands in its own login shell (`zsh -lc`). Its `PATH` and tool versions can differ from the Claude session's, so pin or measure required versions inside the workspace.
 
-## Rules for the rescue wrapper
+## How `/codex:rescue` routes
 
-- Make exactly one Bash call to `task`, or to `steer` for a running job.
-- Strip routing flags (`--background`, `--wait`, `--resume`, `--fresh`, and `--job`) from the prompt and translate them to the corresponding CLI controls.
-- Add `--write` by default unless the user asks for read-only work; leave model and effort unset unless requested.
-- Preserve the remaining task text, return stdout verbatim, and never inspect the repository or perform follow-up work.
-- Do not call `setup`, `review`, `adversarial-review`, `status`, `result`, or `cancel`; `task` and `steer` are the only entry points.
-- `--effort` accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
-- If the Bash call fails or Codex cannot be invoked, return nothing.
+- The command runs inline on the main thread and makes exactly one `Agent` call, or one `SendMessage` call when the request steers a job that is already running. There is no rescue subagent.
+- Strip the flags (`--background`, `--wait`, `--resume`, `--fresh`, `--job`, `--model`, and `--effort`) from the request and map them onto tool parameters: `--background` to `run_in_background: true`, `--resume` and `--job <id>` to `resume: <job id>`, `--fresh` to no `resume`, and `--model`/`--effort` to `model`/`effort`.
+- Pass `write: true` by default unless the user asks for read-only work; leave model and effort unset unless requested.
+- `effort` accepted values are `none`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+- The remaining task text is the `prompt`, unreshaped: return the tool output verbatim, and never inspect the repository or perform follow-up work.
+- If the tool call fails or Codex cannot be invoked, report that failure and stop instead of answering the request from Claude.

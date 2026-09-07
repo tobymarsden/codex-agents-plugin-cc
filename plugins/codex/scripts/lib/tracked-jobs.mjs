@@ -22,7 +22,8 @@ function normalizeProgressEvent(value) {
       stderrMessage: value.stderrMessage == null ? null : String(value.stderrMessage).trim(),
       logTitle: typeof value.logTitle === "string" && value.logTitle.trim() ? value.logTitle.trim() : null,
       logBody: value.logBody == null ? null : String(value.logBody).trimEnd(),
-      record: value.record && typeof value.record === "object" ? value.record : null
+      record: value.record && typeof value.record === "object" ? value.record : null,
+      tokenUsage: value.tokenUsage && typeof value.tokenUsage === "object" ? value.tokenUsage : null
     };
   }
 
@@ -36,7 +37,8 @@ function normalizeProgressEvent(value) {
     stderrMessage: String(value ?? "").trim(),
     logTitle: null,
     logBody: null,
-    record: null
+    record: null,
+    tokenUsage: null
   };
 }
 
@@ -114,6 +116,14 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
         patch[field] = value;
         changed = true;
       }
+    }
+
+    // Usage is not a scalar; its running total is what changes.
+    const usage = normalized.tokenUsage;
+    if (usage && usage.totalTokens !== lastValues.get("tokenUsage")) {
+      lastValues.set("tokenUsage", usage.totalTokens);
+      patch.tokenUsage = usage;
+      changed = true;
     }
 
     if (!changed) {

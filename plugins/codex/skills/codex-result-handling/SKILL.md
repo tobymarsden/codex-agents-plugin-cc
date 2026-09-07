@@ -15,8 +15,8 @@ When the helper returns Codex output:
 - The same rules apply to text returned by `TaskOutput` and by the `output` and `result` subcommands; when relaying a result, keep its `Model:`/`Tokens:` line so the reader knows what ran and what it cost.
 - If there are no findings, say that explicitly and keep the residual-risk note brief.
 - If Codex made edits, say so explicitly and list the touched files when the helper provides them.
-- For `codex:codex-rescue`, do not turn a failed or incomplete Codex run into a Claude-side implementation attempt. Report the failure and stop.
-- For `codex:codex-rescue`, if Codex was never successfully invoked, do not generate a substitute answer at all.
+- For `/codex:rescue`, do not turn a failed or incomplete Codex run into a Claude-side implementation attempt. Report the failure and stop.
+- For `/codex:rescue`, if Codex was never successfully invoked, do not generate a substitute answer at all.
 - CRITICAL: After presenting review findings, STOP. Do not make any code changes. Do not fix any issues. You MUST explicitly ask the user which issues, if any, they want fixed before touching a single file. Auto-applying fixes from a review is strictly forbidden, even if the fix is obvious.
 - If the helper reports malformed output or a failed Codex run, include the most actionable stderr lines and stop there instead of guessing.
 - If the helper reports that setup or authentication is required, direct the user to `/codex:setup` and do not improvise alternate auth flows.

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.0
+
+- The plugin ships a background monitor, so an installed plugin notifies the session itself when a Codex job finishes, with no command to run. Monitors are experimental: they start only in interactive CLI sessions and do not load for a project-scope plugin, so the `output --wait` recipe remains the fallback
+- A command's trace line carries its outcome, not just its exit code: the output's size, then a bounded tail of its own trailing lines, so a run reporting `pass 0, fail 1` can no longer read as a success
+- `fileChange` trace lines say what happened to each file: `src/csv.js (add +120)`, `README.md (update +3-1)`
+- Durations are measured here when the server reports none, instead of showing a misleading zero
+- Token usage is recorded as it arrives, so a cancelled job still reports what it spent
+- `ListAgents` formats token counts like `TaskOutput`, and marks a job that has been continued with the id that now reads it
+- `TaskStop` speaks in the same voice as the other tools and no longer names a slash command the caller does not have
+- The rescue subagent is deleted; `/codex:rescue` calls the `Agent` tool from the main thread, which costs nothing extra and removes a hop
+
 ## 1.5.0
 
 - Every job now writes a structured event store beside its log, one JSON record per completed action, carrying the full command, the changed paths and their diffs, tool arguments and results, and the agent's messages

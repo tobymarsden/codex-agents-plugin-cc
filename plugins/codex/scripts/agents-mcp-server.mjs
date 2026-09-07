@@ -9,6 +9,7 @@ import process from "node:process";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
+import { formatTokenCount } from "./lib/render.mjs";
 import { loadSessionId } from "./lib/state.mjs";
 import { SESSION_ID_ENV } from "./lib/tracked-jobs.mjs";
 
@@ -79,6 +80,22 @@ function requireString(args, key) {
 function shorten(text, limit) {
   const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 3)}...`;
+}
+
+/** The newest job of a resume chain, so a listed parent names where its work went on. */
+function newestDescendant(jobs, jobId) {
+  let latest = null;
+  let currentId = jobId;
+  // The chain is linear and finite; the bound keeps a malformed store from spinning.
+  for (let step = 0; step < jobs.length; step += 1) {
+    const child = jobs.find((job) => job.parentJobId === currentId);
+    if (!child) {
+      break;
+    }
+    latest = child.id;
+    currentId = child.id;
+  }
+  return latest;
 }
 
 const CWD_SCHEMA = { type: "string", description: "Workspace directory for the job; defaults to the server's working directory." };
@@ -269,13 +286,18 @@ const TOOLS = [
           line += `  ${job.model}`;
         }
         if (job.tokenUsage?.totalTokens != null) {
-          line += `  ${job.tokenUsage.totalTokens}tok`;
+          line += `  ${formatTokenCount(job.tokenUsage.totalTokens)}tok`;
         }
         if (active.has(job.id)) {
           const { thread } = await cliJson(["output", job.id, ...workspace, "--json", "--tail", "0"]);
           if (thread) {
             line += `  thread:${thread.status?.type ?? "unknown"}${thread.canAcceptDirectInput ? ",accepts-input" : ""}`;
           }
+        }
+        // TaskOutput resolves a job id forward through its resume chain; the listing says so.
+        const continued = newestDescendant(jobs, job.id);
+        if (continued) {
+          line += ` → continued as ${continued}`;
         }
         lines.push(line);
       }
