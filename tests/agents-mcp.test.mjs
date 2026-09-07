@@ -172,7 +172,7 @@ test("agents MCP tools drive a Codex job from launch through steer, resume, list
     assert.equal(steered.isError, false, steered.text);
     assert.ok(steered.text.startsWith("Steered job"), steered.text);
 
-    const waited = await callTool(server, "TaskOutput", { task_id: taskId, block: true, timeout: 15000 });
+    const waited = await callTool(server, "TaskOutput", { task_id: taskId, block: true, timeout: 15000, tail: 40 });
     assert.equal(waited.isError, false, waited.text);
     assert.match(waited.text, /completed/);
     assert.match(waited.text, /Steered: change course/);
@@ -263,7 +263,7 @@ test("SendMessage keeps one job id across resumes and leaves a linear chain", as
   assert.equal(cleanup.status, 0, cleanup.stderr);
 });
 
-test("TaskOutput reads the log forward on later calls in one server process", async () => {
+test("TaskOutput includes the log only when tail is given, and reads it forward on later calls", async () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir, "interruptible-slow-task");
@@ -289,13 +289,19 @@ test("TaskOutput reads the log forward on later calls in one server process", as
     };
 
     appendLines("batch-one", 60);
-    const first = await callTool(server, "TaskOutput", { task_id: taskId, block: false });
+    const bare = await callTool(server, "TaskOutput", { task_id: taskId, block: false });
+    assert.equal(bare.isError, false, bare.text);
+    assert.doesNotMatch(bare.text, /batch-one/);
+    assert.doesNotMatch(bare.text, /\[log lines/);
+    assert.match(bare.text, /^Log: \d+ lines at .+ \(add --tail <n> to include them\)$/m);
+
+    const first = await callTool(server, "TaskOutput", { task_id: taskId, block: false, tail: 40 });
     assert.equal(first.isError, false, first.text);
     assert.match(first.text, /batch-one line 59/);
     const readSoFar = Number(first.text.match(/\[log lines \d+-\d+ of (\d+)\]/)[1]);
 
     appendLines("batch-two", 3);
-    const second = await callTool(server, "TaskOutput", { task_id: taskId, block: false });
+    const second = await callTool(server, "TaskOutput", { task_id: taskId, block: false, tail: 40 });
     assert.equal(second.isError, false, second.text);
     assert.doesNotMatch(second.text, /batch-one/);
     assert.match(second.text, /batch-two line 2/);

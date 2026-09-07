@@ -259,3 +259,29 @@ Two live probes against a direct `codex app-server` 0.153.4 before step 1:
   filter by thread (`captureTurn`'s `belongsToTurn`), so Codex-spawned
   subagent threads keep reaching their parent's starter without the broker
   parsing `collabAgentToolCall` items.
+
+## 8. Output levels
+
+Shipped in 1.4.0: the reader gets the final message plus metadata, and the
+trail stays on disk behind a path, which is what a native subagent does
+(its `.output` is a symlink to the subagent's full transcript, and the
+harness's own tool description tells the parent not to load it).
+
+The chair's design goes one better than native, in three levels:
+
+1. **Final message only.** The default, as shipped.
+2. **A mechanical trace.** One numbered line per tool call: the full
+   command for a shell call, the path a file edit touched without the
+   replacement text, and the agent's own messages in full. Mechanical,
+   not model-summarised, so it is cheap, faithful, and stable.
+3. **One step in full.** `output <id> --step <n>` returns the complete
+   call and result behind line `n` of that trace.
+
+Level 2 is not free with today's log. `describeStartedItem` shortens a
+command to 96 characters and a file change is logged only as
+"Applying N file change(s)", with no paths, so the log is lossy exactly
+where the trace needs fidelity. Levels 2 and 3 therefore want a
+structured per-job event store written beside the log (one JSON object
+per event, carrying the full command, the touched paths, and the item
+id), which the progress reporter already sees and currently discards.
+The log stays as the human-readable stream; the trace reads the store.

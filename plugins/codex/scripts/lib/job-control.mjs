@@ -8,7 +8,6 @@ import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
-export const DEFAULT_OUTPUT_TAIL_LINES = 40;
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
@@ -307,7 +306,8 @@ function readJobLogTail(logFile, maxLines, since = 0) {
   }
 
   const logTotal = lines.length;
-  const shown = lines.slice(since).slice(-maxLines);
+  // `slice(-0)` keeps everything, so a zero tail has to short-circuit.
+  const shown = maxLines > 0 ? lines.slice(since).slice(-maxLines) : [];
   return { lines: shown, logStart: logTotal - shown.length + 1, logTotal, logSince: since };
 }
 
@@ -339,11 +339,8 @@ export async function buildOutputSnapshot(cwd, reference, options = {}) {
 
   // A reader cursor belongs to the log it was measured against, so it does not carry
   // across a resume: the descendant's log is a different, shorter file.
-  const log = readJobLogTail(
-    job.logFile,
-    options.tail ?? DEFAULT_OUTPUT_TAIL_LINES,
-    continuedFrom ? 0 : (options.since ?? 0)
-  );
+  // The trail is opt-in: without `--tail` the reader gets the result and the log's path.
+  const log = readJobLogTail(job.logFile, options.tail ?? 0, continuedFrom ? 0 : (options.since ?? 0));
 
   return {
     workspaceRoot,
@@ -353,6 +350,7 @@ export async function buildOutputSnapshot(cwd, reference, options = {}) {
     logStart: log.logStart,
     logTotal: log.logTotal,
     logSince: log.logSince,
+    logFile: job.logFile ?? null,
     result: isFinalJobStatus(job.status) ? readJobResultText(storedJob) : null,
     thread: runtimeThread
       ? {

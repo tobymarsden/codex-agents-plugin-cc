@@ -94,6 +94,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs steer <job-id> [--prompt-file <path>] [--json] [text]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs output <job-id> [--wait <ms>] [--tail <n>] [--since <n>] [--json]",
+      "    --tail includes that many log lines; without it the log stays on disk and only its path is reported.",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"

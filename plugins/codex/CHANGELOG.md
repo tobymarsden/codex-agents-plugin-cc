@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.0
+
+- `TaskOutput` and `output` return the result and its metadata, not the job's log: Codex's reasoning and commands stay on disk and the read reports the log's path, mirroring how a native subagent hands its parent a report and keeps its transcript in a file
+- The trail is one flag away: `TaskOutput`'s new `tail`, or `output --tail <n>`, includes that many log lines and still reads forward on repeat calls
+
 ## 1.3.0
 
 - `TaskOutput`'s blocking wait defaults to thirty minutes instead of four, so one call usually covers a job instead of a poll loop

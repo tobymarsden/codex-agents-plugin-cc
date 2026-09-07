@@ -187,13 +187,17 @@ const TOOLS = [
   {
     name: "TaskOutput",
     description:
-      "Read a Codex job's output: its status, model and tokens, live thread state, recent log, and final result. block waits until it finishes or timeout. For a completion notification instead of polling, run the output --wait command that Agent printed under a background Bash call.",
+      "Read a Codex job's output: its status, model and tokens, live thread state, and final result. block waits until it finishes or timeout. tail includes that many lines of the job's log on request; the log's path is reported either way. For a completion notification instead of polling, run the output --wait command that Agent printed under a background Bash call.",
     inputSchema: {
       type: "object",
       properties: {
         task_id: { type: "string", description: "Job id to read." },
         block: { type: "boolean", description: "Wait for the job to finish; defaults to true." },
         timeout: { type: "number", description: "Milliseconds to wait when blocking; defaults to 1800000." },
+        tail: {
+          type: "number",
+          description: "Log lines of Codex's reasoning and commands to include; omit for the result only."
+        },
         cwd: CWD_SCHEMA
       },
       required: ["task_id"]
@@ -202,7 +206,13 @@ const TOOLS = [
       const taskId = requireString(args, "task_id");
       const workspace = cwdFlags(args);
       const cursor = logCursors.get(taskId);
-      const command = ["output", taskId, ...workspace, ...(cursor === undefined ? [] : ["--since", String(cursor)])];
+      const command = [
+        "output",
+        taskId,
+        ...workspace,
+        ...(cursor === undefined ? [] : ["--since", String(cursor)]),
+        ...(args.tail == null ? [] : ["--tail", String(args.tail)])
+      ];
       if (args.block !== false) {
         command.push("--wait", String(args.timeout ?? DEFAULT_OUTPUT_TIMEOUT_MS));
       }

@@ -428,12 +428,15 @@ export function renderJobOutput(snapshot, waitTimeoutMs = null) {
     lines.push(`Thread: ${snapshot.thread.status?.type ?? "unknown"}${acceptsInput}`);
   }
 
-  if (snapshot.log.length === 0 && snapshot.logTotal > 0 && snapshot.logSince > 0) {
-    lines.push("[no new log lines since the last read]");
-  } else {
+  if (snapshot.log.length > 0) {
     lines.push(...snapshot.log);
-    // Always report the totals: this line is how a repeat reader learns where to resume.
+    // Report the totals whenever lines are shown: this is how a repeat reader learns where to resume.
     lines.push(`[log lines ${snapshot.logStart}-${snapshot.logTotal} of ${snapshot.logTotal}]`);
+  } else if (snapshot.logTotal > 0 && snapshot.logSince > 0) {
+    lines.push("[no new log lines since the last read]");
+  } else if (snapshot.logTotal > 0) {
+    // The trail stays on disk rather than in the reader's context; it is one flag away.
+    lines.push(`Log: ${snapshot.logTotal} lines at ${snapshot.logFile} (add --tail <n> to include them)`);
   }
 
   if (snapshot.result != null) {

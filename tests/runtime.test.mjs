@@ -2047,8 +2047,23 @@ test("output peeks at a running job without blocking", async () => {
   assert.equal(snapshot.job.status, "running");
   assert.equal(snapshot.thread.status.type, "active");
   assert.equal(snapshot.thread.canAcceptDirectInput, true);
-  assert.ok(snapshot.log.some((line) => /Turn started/.test(line)), snapshot.log.join("\n"));
+  assert.deepEqual(snapshot.log, []);
+  assert.ok(snapshot.logTotal > 0, `expected a log to exist, got ${snapshot.logTotal}`);
   assert.equal(snapshot.result, null);
+
+  // A live read reports where the job stands and where its trail is, without pulling the trail in.
+  const rendered = run("node", [SCRIPT, "output", runningJob.id], { cwd: repo, env });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  assert.match(rendered.stdout, new RegExp(`^Job ${runningJob.id}: running \\(`, "m"));
+  const pointer = rendered.stdout.match(/^Log: (\d+) lines at (.+) \(add --tail <n> to include them\)$/m);
+  assert.ok(pointer, rendered.stdout);
+  assert.equal(pointer[2], snapshot.logFile);
+  assert.ok(Number(pointer[1]) > 0, rendered.stdout);
+  assert.doesNotMatch(rendered.stdout, /^\[[^\]]+\] /m);
+
+  const tailed = run("node", [SCRIPT, "output", runningJob.id, "--tail", "40"], { cwd: repo, env });
+  assert.equal(tailed.status, 0, tailed.stderr);
+  assert.match(tailed.stdout, /Turn started/);
 
   const cancelled = run("node", [SCRIPT, "cancel", runningJob.id, "--json"], { cwd: repo, env });
   assert.equal(cancelled.status, 0, cancelled.stderr);
@@ -2140,7 +2155,11 @@ test("output reads a finished job after the shared runtime is gone", () => {
   const snapshot = JSON.parse(peeked.stdout);
   assert.equal(snapshot.thread, null);
   assert.match(snapshot.result, /Handled the requested task/);
-  assert.ok(snapshot.log.length > 0);
+  // The trail is opt-in: the payload names the log file and counts it, but carries no lines.
+  assert.deepEqual(snapshot.log, []);
+  assert.ok(snapshot.logTotal > 0, `expected a log to exist, got ${snapshot.logTotal}`);
+  assert.equal(snapshot.logSince, 0);
+  assert.ok(fs.existsSync(snapshot.logFile), snapshot.logFile);
 
   const tailed = run("node", [SCRIPT, "output", finishedJob.id, "--tail", "2", "--json"], { cwd: repo, env });
   assert.equal(tailed.status, 0, tailed.stderr);
@@ -2161,6 +2180,24 @@ test("output renders a finished job as text", () => {
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.ok(rendered.stdout.startsWith(`Job ${finishedJob.id}: completed`), rendered.stdout);
   assert.match(rendered.stdout, /Handled the requested task/);
+  assert.match(rendered.stdout, /^Model: gpt-test \(medium\)  Tokens: \d+ total, /m);
+
+  // A default read points at the trail instead of pasting it in.
+  const snapshot = JSON.parse(run("node", [SCRIPT, "output", finishedJob.id, "--json"], { cwd: repo, env }).stdout);
+  assert.ok(
+    rendered.stdout.includes(
+      `Log: ${snapshot.logTotal} lines at ${snapshot.logFile} (add --tail <n> to include them)`
+    ),
+    rendered.stdout
+  );
+  assert.doesNotMatch(rendered.stdout, /^\[[^\]]+\] /m);
+
+  // --tail brings the trail back, with its cursor trailer and no pointer.
+  const tailed = run("node", [SCRIPT, "output", finishedJob.id, "--tail", "5"], { cwd: repo, env });
+  assert.equal(tailed.status, 0, tailed.stderr);
+  assert.match(tailed.stdout, /^\[[^\]]+\] /m);
+  assert.match(tailed.stdout, new RegExp(`\\[log lines \\d+-${snapshot.logTotal} of ${snapshot.logTotal}\\]`));
+  assert.doesNotMatch(tailed.stdout, /add --tail <n> to include them/);
 });
 
 test("output --since reads the log forward from a line offset", () => {
@@ -2373,7 +2410,7 @@ test("output text for a finished job shows the model line once and no duplicated
   const finishedJob = runFinishedFixtureTask(repo, env);
   endFixtureSession(repo, env);
 
-  const rendered = run("node", [SCRIPT, "output", finishedJob.id], { cwd: repo, env });
+  const rendered = run("node", [SCRIPT, "output", finishedJob.id, "--tail", "1000"], { cwd: repo, env });
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.equal(rendered.stdout.split(EXPECTED_META_LINE).length - 1, 1);
   assert.doesNotMatch(rendered.stdout, /^\[[^\]]+\] Final output$/m);
@@ -2382,7 +2419,9 @@ test("output text for a finished job shows the model line once and no duplicated
   assert.equal(rendered.stdout.split("Handled the requested task.\nTask prompt accepted.").length - 1, 2);
   assert.ok(rendered.stdout.trimEnd().endsWith("Handled the requested task.\nTask prompt accepted."), rendered.stdout);
 
-  const snapshot = JSON.parse(run("node", [SCRIPT, "output", finishedJob.id, "--json"], { cwd: repo, env }).stdout);
+  const snapshot = JSON.parse(
+    run("node", [SCRIPT, "output", finishedJob.id, "--tail", "1000", "--json"], { cwd: repo, env }).stdout
+  );
   assert.equal(
     snapshot.log.filter((line) => /^\[[^\]]+\] Final output$/.test(line)).length,
     0
