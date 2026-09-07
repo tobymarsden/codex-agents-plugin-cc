@@ -10,6 +10,9 @@
 - `codex-cli-runtime` is reframed around the MCP tools
 - The rescue wrapper is de-emphasised in favour of direct MCP tool use
 - Model examples are updated, and the Spark alias is documented by reference to `MODEL_ALIASES`
+- A job whose app-server connection dies fails with `CODEX_CONNECTION_LOST` instead of staying `running` forever
+- `SessionEnd` leaves the shared broker running while another Claude session in the workspace has active jobs, and only removes the session id file it owns
+- A live broker gets the full readiness timeout before being replaced, so a busy broker is not torn down under its jobs
 
 ## 1.1.0
 
