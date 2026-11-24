@@ -158,7 +158,7 @@ Ask Codex to redesign the database connection to be more resilient.
 
 **Notes:**
 
-- if you do not pass `--model` or `--effort`, the plugin runs `gpt-6-astra` at `high` effort.
+- if you do not pass `--model` or `--effort`, the plugin runs `gpt-6.2-sol` at `high` effort. That model needs a recent Codex CLI: 0.153 rejects it, 0.172 runs it (see [why the plugin can still run the old Codex after an upgrade](#why-does-the-plugin-still-run-the-old-codex-after-i-upgrade))
 - `spark` maps to the current Codex Spark model (the alias lives in `MODEL_ALIASES` in `codex-companion.mjs`)
 - follow-up rescue requests can continue the latest Codex task in the repo
 - rescue runs add `--write` by default unless you ask for read-only work, and `--write` gives Codex full access with no sandbox
@@ -311,6 +311,12 @@ That means:
 - it uses the same Codex install you would use directly
 - it uses the same local authentication state
 - it uses the same repository checkout and machine-local environment
+
+### Why does the plugin still run the old Codex after I upgrade?
+
+The plugin keeps one Codex app server running per workspace, behind a small broker that the first job starts. That process keeps the Codex version it started with. It stops when the Claude Code session that uses it ends, unless another session in the same folder still has a Codex job running. Until then, the jobs it runs ignore an upgrade. A model the new Codex offers can fail with an error such as "The 'gpt-6.2-sol' model is not supported when using Codex with a ChatGPT account".
+
+After upgrading Codex, wait until no Codex job is running in that folder, then end or restart the Claude Code sessions that use the plugin there. The next job starts a fresh broker on the upgraded Codex.
 
 ### Will it use the same Codex config I already have?
 

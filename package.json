@@ -1,6 +1,6 @@
 {
   "name": "@tobymarsden/codex-agents-plugin-cc",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "description": "Drive Codex agents from Claude Code with the same verbs as native subagents.",

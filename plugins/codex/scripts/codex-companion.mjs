@@ -81,7 +81,7 @@ const OUTPUT_FINALIZE_POLL_INTERVAL_MS = 100;
 const OUTPUT_FINALIZE_WINDOW_MS = 5000;
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 // What a task runs as when the caller names nothing. A caller who names either wins.
-const DEFAULT_MODEL = "gpt-6-astra";
+const DEFAULT_MODEL = "gpt-6.2-sol";
 const DEFAULT_EFFORT = "high";
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
