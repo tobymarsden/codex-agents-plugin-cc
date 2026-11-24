@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Drive Codex agents from Claude Code with the same verbs as native subagents.",
-    "version": "2.0.0"
+    "version": "2.1.0"
   },
   "plugins": [
     {
       "name": "codex",
       "description": "Use Codex agents from Claude Code as if they were native subagents: spawn, watch, steer, resume, stop.",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "author": {
         "name": "Toby Marsden"
       },

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.0
+
+- Tasks default to `gpt-6.2-sol` at `high` effort, instead of `gpt-6-astra`; naming a model or an effort still wins. The model needs a recent Codex CLI: 0.153 rejects it as not supported, 0.172 runs it
+- The README explains that the plugin's app-server broker keeps the Codex version it started with until its Claude Code session ends, so a Codex upgrade reaches the plugin only after that
+
 ## 2.0.0
 
 Breaking: the plugin narrows to one job, letting a Claude session drive Codex agents the way it drives native subagents.

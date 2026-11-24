@@ -444,7 +444,7 @@ test("the Agent tool runs a job in the cwd it is given and prints the Monitor re
     const listed = await callTool(server, "ListAgents", { cwd: otherRepo });
     assert.equal(listed.isError, false, listed.text);
     // Neither model nor effort was named, so the job ran on the plugin's default model.
-    assert.match(listed.text, /gpt-6-astra/);
+    assert.match(listed.text, /gpt-6\.2-sol/);
     assert.match(listed.text, /1280tok/);
     assert.match(listed.text, /282\.5ktok/);
 

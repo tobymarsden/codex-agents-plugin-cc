@@ -855,7 +855,7 @@ test("a task that names neither model nor effort runs on the plugin's defaults",
 
   assert.equal(result.status, 0, result.stderr);
   const { lastTurnStart } = JSON.parse(fs.readFileSync(statePath, "utf8"));
-  assert.equal(lastTurnStart.model, "gpt-6-astra");
+  assert.equal(lastTurnStart.model, "gpt-6.2-sol");
   assert.equal(lastTurnStart.effort, "high");
 });
 
@@ -2263,7 +2263,7 @@ test("output renders a finished job as text", () => {
   assert.equal(rendered.status, 0, rendered.stderr);
   assert.ok(rendered.stdout.startsWith(`Job ${finishedJob.id}: completed`), rendered.stdout);
   assert.match(rendered.stdout, /Handled the requested task/);
-  assert.match(rendered.stdout, /^Model: gpt-6-astra \(high\)  Tokens: \d+ total, /m);
+  assert.match(rendered.stdout, /^Model: gpt-6\.2-sol \(high\)  Tokens: \d+ total, /m);
 
   // A default read points at the trail instead of pasting it in.
   const snapshot = JSON.parse(run("node", [SCRIPT, "output", finishedJob.id, "--json"], { cwd: repo, env }).stdout);
@@ -2670,7 +2670,7 @@ const EXPECTED_TOKEN_USAGE = {
 };
 
 // A task that names neither runs on the plugin's defaults, and reports what ran.
-const EXPECTED_META_LINE = "Model: gpt-6-astra (high)  Tokens: 1280 total, 1200 in (300 cached), 80 out (40 reasoning)";
+const EXPECTED_META_LINE = "Model: gpt-6.2-sol (high)  Tokens: 1280 total, 1200 in (300 cached), 80 out (40 reasoning)";
 
 test("a finished task records the resolved model, effort, and its turn's token usage", () => {
   const repo = makeTempDir();
@@ -2686,17 +2686,17 @@ test("a finished task records the resolved model, effort, and its turn's token u
   const indexed = JSON.parse(fs.readFileSync(path.join(stateDir, "state.json"), "utf8")).jobs.find(
     (job) => job.jobClass === "task"
   );
-  assert.equal(indexed.model, "gpt-6-astra");
+  assert.equal(indexed.model, "gpt-6.2-sol");
   assert.equal(indexed.effort, "high");
   assert.deepEqual(indexed.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   const stored = JSON.parse(fs.readFileSync(path.join(stateDir, "jobs", `${indexed.id}.json`), "utf8"));
-  assert.equal(stored.model, "gpt-6-astra");
+  assert.equal(stored.model, "gpt-6.2-sol");
   assert.equal(stored.effort, "high");
   assert.deepEqual(stored.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   const snapshot = JSON.parse(run("node", [SCRIPT, "output", indexed.id, "--json"], { cwd: repo, env }).stdout);
-  assert.equal(snapshot.job.model, "gpt-6-astra");
+  assert.equal(snapshot.job.model, "gpt-6.2-sol");
   assert.deepEqual(snapshot.job.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   const statusPayload = JSON.parse(run("node", [SCRIPT, "status", indexed.id, "--json"], { cwd: repo, env }).stdout);
@@ -2704,7 +2704,7 @@ test("a finished task records the resolved model, effort, and its turn's token u
   assert.deepEqual(statusPayload.job.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   const resultPayload = JSON.parse(run("node", [SCRIPT, "result", indexed.id, "--json"], { cwd: repo, env }).stdout);
-  assert.equal(resultPayload.job.model, "gpt-6-astra");
+  assert.equal(resultPayload.job.model, "gpt-6.2-sol");
   assert.deepEqual(resultPayload.storedJob.tokenUsage, EXPECTED_TOKEN_USAGE);
 
   endFixtureSession(repo, env);
@@ -2730,7 +2730,7 @@ test("a resumed job reports its own turn's tokens, not the thread's running tota
   const childJob = readIndex().find((job) => job.parentJobId === parentJob.id);
   // The fixture's thread-wide total is 2560 after the second turn; the job reports its delta.
   assert.deepEqual(childJob.tokenUsage, EXPECTED_TOKEN_USAGE);
-  assert.equal(childJob.model, "gpt-6-astra");
+  assert.equal(childJob.model, "gpt-6.2-sol");
 
   endFixtureSession(repo, env);
 });
